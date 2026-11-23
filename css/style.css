@@ -329,3 +329,5 @@ button:focus-visible, input:focus-visible, a:focus-visible {
 .swatches { display: flex; gap: 10px; justify-content: center; }
 .swatch { width: 44px; height: 44px; border: 3px solid var(--surface); border-radius: 50%; box-shadow: 0 0 0 2px var(--border); cursor: pointer; }
 .hint { font-size: 1.6rem; font-weight: 800; letter-spacing: 0.2em; }
+
+[hidden] { display: none !important; }
