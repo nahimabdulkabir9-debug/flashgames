@@ -32,6 +32,7 @@ export default {
 
     const head = el('section', { class: 'card center' });
     const canvas = el('canvas', { class: 'pic-canvas', width: 600, height: 600 });
+    canvas.style.touchAction = 'none'; // stop the page scrolling while drawing
     const ctx = canvas.getContext('2d');
     const panel = el('section', { class: 'card stack' });
     const board = el('section', { class: 'card' });
@@ -117,6 +118,14 @@ export default {
 
     // ----- Player actions -----
     async function choose(word) {
+      try {
+        await pickWord(word);
+      } catch (err) {
+        console.error(err);
+        toast(`Could not start drawing: ${err.message}`);
+      }
+    }
+    async function pickWord(word) {
       myWord = word; shown = 0;
       positions = shuffled(Array.from(word, (_, i) => i)).slice(0, isHard(word) ? 2 : 1);
       await update(gref(), { phase: 'draw', hash: await hash(word, `${session.code}${g.round}`), len: word.length, hint: maskHint(0), endsAt: serverNow() + DRAW_MS });
@@ -183,7 +192,7 @@ export default {
         const key = `${g.round}|${g.phase}|${Boolean(g.solved?.[session.uid])}|${g.word || ''}|${prev === null}`;
         if (key !== panelKey) { panelKey = key; renderPanel(); }
         mount(head, el('h2', {}, `Round ${Math.min(g.round + 1, g.total)} of ${g.total} `, timer),
-          el('p', { class: 'muted' }, g.phase === 'draw' ? `${nameOf(g.drawer)} is drawing` : 'Pictionary'));
+          el('p', { class: 'muted' }, g.phase === 'draw' ? `${nameOf(g.drawer)} is drawing` : 'Pictionary · v2'));
         mount(board, el('h2', {}, 'Scores'), el('ul', { class: 'player-list' }, session.playerList()
           .sort((a, b) => (g.scores?.[b.uid] || 0) - (g.scores?.[a.uid] || 0))
           .map((p) => el('li', { class: 'player' },
