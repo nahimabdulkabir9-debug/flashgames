@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- FlashGames app icon: green tile, orange/yellow zigzag, white lightning bolt. -->
+  <rect width="512" height="512" rx="112" fill="#008751"/>
+  <path d="M0 400 L64 352 L128 400 L192 352 L256 400 L320 352 L384 400 L448 352 L512 400 L512 512 L0 512 Z" fill="#ff7a1a"/>
+  <path d="M0 448 L64 400 L128 448 L192 400 L256 448 L320 400 L384 448 L448 400 L512 448 L512 512 L0 512 Z" fill="#ffc83d"/>
+  <path d="M290 64 L150 280 L246 280 L214 440 L362 208 L264 208 Z" fill="#ffffff"/>
+</svg>
