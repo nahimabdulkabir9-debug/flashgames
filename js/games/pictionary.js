@@ -118,7 +118,7 @@ export default {
     // ----- Player actions -----
     async function choose(word) {
       myWord = word; shown = 0;
-      positions = shuffled([...word.keys()]).slice(0, isHard(word) ? 2 : 1);
+      positions = shuffled(Array.from(word, (_, i) => i)).slice(0, isHard(word) ? 2 : 1);
       await update(gref(), { phase: 'draw', hash: await hash(word, `${session.code}${g.round}`), len: word.length, hint: maskHint(0), endsAt: serverNow() + DRAW_MS });
     }
     async function guess(text) {
