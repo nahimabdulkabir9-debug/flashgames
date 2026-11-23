@@ -6,24 +6,28 @@ import { el, mount, toast } from '../ui.js';
 
 const WORDS = ('apple,banana,bicycle,castle,dragon,guitar,rocket,pizza,umbrella,elephant,volcano,robot,rainbow,penguin,lighthouse,'
   + 'sandwich,snowman,airplane,camera,butterfly,pyramid,tractor,bridge,candle,dinosaur,spider,hamburger,windmill,scissors,football,'
-  + 'mountain,helicopter,cactus,octopus,teapot,skateboard,ladder,key,clock,whale,sunflower,tent,train,crown,ghost,giraffe,mushroom,telescope,fireworks').split(',');
+  + 'mountain,helicopter,cactus,octopus,teapot,skateboard,ladder,key,clock,whale,sunflower,tent,train,crown,ghost,giraffe,mushroom,telescope,fireworks,microscope,waterfall,astronaut,submarine,crocodile,trampoline,parachute,bulldozer,snowflake,campfire').split(',');
 const COLORS = ['#111111', '#e03131', '#1c7ed6', '#2f9e44', '#f08c00', '#9c36b5'];
 const DRAW_MS = 80000;
 const OVER_MS = 6000;
+const ROUNDS_EACH = 3; // how many times each player gets to draw
+const isHard = (w) => w.length >= 7; // hard words reveal 2 letters, easy words reveal 1
 
 const norm = (s) => String(s).toLowerCase().replace(/[^a-z]/g, '');
 async function hash(word, salt) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${salt}:${norm(word)}`));
   return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
 }
-const pick3 = () => [...WORDS].sort(() => Math.random() - 0.5).slice(0, 3);
+const shuffled = (list) => [...list].sort(() => Math.random() - 0.5);
+// The drawer gets two easy words and one hard word to choose from.
+const pick3 = () => shuffled([...shuffled(WORDS.filter((w) => !isHard(w))).slice(0, 2), shuffled(WORDS.filter(isHard))[0]]);
 
 export default {
   id: 'pictionary', name: 'Pictionary', emoji: '🎨', blurb: 'Draw the word, friends guess it.', minPlayers: 2,
 
   create(container, session, api) {
     const gref = (sub = '') => ref(db, `rooms/${session.code}/game${sub}`);
-    let g = null; let myWord = null; let choices = []; let choicesRound = -1;
+    let g = null; let myWord = null; let positions = []; let shown = 0; let hintEl = null; let choices = []; let choicesRound = -1;
     let drawing = null; let color = COLORS[0]; let lastPush = 0; let panelKey = ''; let acting = false; let actKey = '';
 
     const head = el('section', { class: 'card center' });
@@ -31,7 +35,11 @@ export default {
     const ctx = canvas.getContext('2d');
     const panel = el('section', { class: 'card stack' });
     const board = el('section', { class: 'card' });
-    mount(container, head, el('section', { class: 'card' }, canvas), panel, board);
+    const endBtn = el('button', {
+      class: 'btn secondary', type: 'button', hidden: true,
+      onclick: () => { if (confirm('End the game for everyone?')) session.endGame(); },
+    }, 'End game');
+    mount(container, head, el('section', { class: 'card' }, canvas), panel, board, endBtn);
 
     const order = () => session.playerList().map((p) => p.uid);
     const canDraw = () => g?.phase === 'draw' && g.drawer === session.uid;
@@ -97,10 +105,21 @@ export default {
       if (g.phase === 'over' && now >= g.overAt) act(() => newRound(g.round + 1));
     }
 
+    // ----- Letter hints -----
+    const maskHint = (n) => [...myWord].map((ch, i) => (positions.slice(0, n).includes(i) ? ch : '_')).join(' ');
+    // The drawer's phone reveals letters as the clock runs down: one for easy words, two for hard ones.
+    function revealTick() {
+      if (!myWord || g?.phase !== 'draw' || g.drawer !== session.uid) return;
+      const left = (g.endsAt - serverNow()) / DRAW_MS;
+      const due = (positions.length > 1 ? [0.55, 0.25] : [0.45]).filter((t) => left <= t).length;
+      if (due > shown) { shown = due; update(gref(), { hint: maskHint(due) }); }
+    }
+
     // ----- Player actions -----
     async function choose(word) {
-      myWord = word;
-      await update(gref(), { phase: 'draw', hash: await hash(word, `${session.code}${g.round}`), len: word.length, endsAt: serverNow() + DRAW_MS });
+      myWord = word; shown = 0;
+      positions = shuffled([...word.keys()]).slice(0, isHard(word) ? 2 : 1);
+      await update(gref(), { phase: 'draw', hash: await hash(word, `${session.code}${g.round}`), len: word.length, hint: maskHint(0), endsAt: serverNow() + DRAW_MS });
     }
     async function guess(text) {
       if (norm(text).length === 0) return;
@@ -113,10 +132,11 @@ export default {
     // ----- Screens -----
     function renderPanel() {
       const kids = [];
+      hintEl = null;
       if (g.phase === 'pick') {
         if (g.drawer === session.uid) {
           if (choicesRound !== g.round) { choices = pick3(); choicesRound = g.round; }
-          kids.push(el('h2', {}, 'Choose a word to draw'), ...choices.map((w) => el('button', { class: 'btn', type: 'button', onclick: () => choose(w) }, w)));
+          kids.push(el('h2', {}, 'Choose a word to draw'), ...choices.map((w) => el('button', { class: 'btn', type: 'button', onclick: () => choose(w) }, `${w} (${isHard(w) ? 'hard' : 'easy'})`)));
         } else kids.push(el('p', { class: 'muted center' }, `${nameOf(g.drawer)} is choosing a word…`));
       } else if (g.phase === 'draw') {
         if (g.drawer === session.uid) {
@@ -131,7 +151,7 @@ export default {
           const input = el('input', { class: 'input', type: 'text', autocomplete: 'off', placeholder: 'Type your guess', enterkeyhint: 'send' });
           const send = () => { guess(input.value); input.value = ''; input.focus(); };
           input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
-          kids.push(el('p', { class: 'center hint' }, Array(g.len || 0).fill('_').join(' ')), input, el('button', { class: 'btn', type: 'button', onclick: send }, 'Guess'));
+          kids.push((hintEl = el('p', { class: 'center hint' }, g.hint || Array(g.len || 0).fill('_').join(' '))), input, el('button', { class: 'btn', type: 'button', onclick: send }, 'Guess'));
         }
       } else if (g.phase === 'over') {
         kids.push(el('h2', { class: 'center' }, `The word was “${g.word || '…'}”`),
@@ -151,12 +171,13 @@ export default {
       if (g?.phase === 'draw') timer.textContent = `⏱ ${Math.max(0, Math.ceil((g.endsAt - serverNow()) / 1000))}s`;
       else timer.textContent = '';
       tick();
+      revealTick();
     }, 500);
 
     return {
       update(room) {
         const prev = g; g = room.game || null;
-        if (!g) { if (session.isHost) set(gref(), { round: 0, total: order().length, drawer: order()[0], phase: 'pick', scores: {} }); return; }
+        if (!g) { if (session.isHost) set(gref(), { round: 0, total: order().length * ROUNDS_EACH, drawer: order()[0], phase: 'pick', scores: {} }); return; }
         if (actKey !== `${g.round}${g.phase}`) { actKey = `${g.round}${g.phase}`; acting = false; }
         if (g.phase === 'over' && g.drawer === session.uid && myWord && !g.word) update(gref(), { word: myWord });
         const key = `${g.round}|${g.phase}|${Boolean(g.solved?.[session.uid])}|${g.word || ''}|${prev === null}`;
@@ -168,6 +189,8 @@ export default {
           .map((p) => el('li', { class: 'player' },
             el('span', { class: 'player-avatar', 'aria-hidden': 'true' }, p.avatar), el('span', { class: 'player-name' }, p.name, p.uid === g.drawer ? ' ✏️' : ''),
             el('span', { class: 'player-status ready' }, `${g.scores?.[p.uid] || 0} pts`)))));
+        if (hintEl) hintEl.textContent = g.hint || Array(g.len || 0).fill('_').join(' ');
+        endBtn.hidden = !(session.isHost && g.phase !== 'final');
         redraw();
       },
       destroy() { clearInterval(clock); },
