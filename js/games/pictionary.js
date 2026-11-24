@@ -3,6 +3,7 @@
 // so guessers cannot read it. The host runs the clock and the scoring.
 import { db, ref, set, update, remove, serverNow } from '../firebase.js';
 import { el, mount, toast } from '../ui.js';
+import { avatarEl } from '../avatars.js';
 
 const WORDS = ('apple,banana,bicycle,castle,dragon,guitar,rocket,pizza,umbrella,elephant,volcano,robot,rainbow,penguin,lighthouse,'
   + 'sandwich,snowman,airplane,camera,butterfly,pyramid,tractor,bridge,candle,dinosaur,spider,hamburger,windmill,scissors,football,'
@@ -196,7 +197,7 @@ export default {
         mount(board, el('h2', {}, 'Scores'), el('ul', { class: 'player-list' }, session.playerList()
           .sort((a, b) => (g.scores?.[b.uid] || 0) - (g.scores?.[a.uid] || 0))
           .map((p) => el('li', { class: 'player' },
-            el('span', { class: 'player-avatar', 'aria-hidden': 'true' }, p.avatar), el('span', { class: 'player-name' }, p.name, p.uid === g.drawer ? ' ✏️' : ''),
+            el('span', { class: 'player-avatar', 'aria-hidden': 'true' }, avatarEl(p.avatar, 44)), el('span', { class: 'player-name' }, p.name, p.uid === g.drawer ? ' ✏️' : ''),
             el('span', { class: 'player-status ready' }, `${g.scores?.[p.uid] || 0} pts`)))));
         if (hintEl) hintEl.textContent = g.hint || Array(g.len || 0).fill('_').join(' ');
         endBtn.hidden = !(session.isHost && g.phase !== 'final');
