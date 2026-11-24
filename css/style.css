@@ -383,3 +383,10 @@ button:focus-visible, input:focus-visible, a:focus-visible {
 .npat-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
 .npat-row:last-child { border-bottom: 0; }
 .npat-row .muted { margin: 2px 0 0; }
+
+/* ---------- Voting ---------- */
+.vote-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.vote-row strong { display: block; overflow-wrap: anywhere; }
+.vote-btns { display: flex; gap: 8px; }
+.vote-btn { width: 48px; height: 48px; border: 2px solid var(--border); border-radius: 14px; background: var(--surface-2); font-size: 1.3rem; cursor: pointer; opacity: 0.6; }
+.vote-btn.on { opacity: 1; border-color: var(--primary); background: var(--surface); box-shadow: 0 0 0 3px rgba(91, 75, 219, 0.3); }
