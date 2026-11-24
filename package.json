@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Static party games site; npm is only needed for local Firebase rules tests.",
   "scripts": {
-    "test": "node --test tests/npat.test.js",
+    "test": "node --test tests/npat.test.js tests/spot-the-liar.test.js",
     "test:rules": "node --test tests/rules.test.js"
   },
   "devDependencies": {

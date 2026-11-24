@@ -27,10 +27,15 @@ See [PROGRESS.md](PROGRESS.md) for what is built so far and what comes next.
 | `js/room.js` | Creates and joins rooms, online/offline presence, kick, leave, automatic host promotion. |
 | `js/home.js` | Home screen: live counters, game catalog, nickname, avatar picker, create or join. |
 | `js/lobby.js` | Lobby: room code, share buttons, live player list, ready, host controls. |
+| `js/games/registry.js` | The game catalog and homepage card details. |
+| `js/games/spot-the-liar.js` | Spot the Liar: host-driven phases, clues, votes, reveal and scoring. |
+| `js/games/spot-the-liar-data.js` | 34-category word bank for Spot the Liar. |
+| `js/games/spot-the-liar-rules.js` | Pure timing and scoring rules shared by the game and tests. |
 | `icons/` | App icon, drawn in SVG. |
 | `firebase/database.rules.json` | Security rules you publish to Firebase. |
 | `firebase.json` | Settings for the local Firebase Emulator. |
 | `tests/rules.test.js` | Emulator-backed regression tests for the security rules. |
+| `tests/spot-the-liar.test.js` | Pure tests for the Spot the Liar word bank and scoring. |
 | `package.json` | Dev-only dependencies/scripts for those tests; the site has no build step. |
 
 ---
@@ -49,6 +54,17 @@ See [PROGRESS.md](PROGRESS.md) for what is built so far and what comes next.
    - `localhost` is already in the list, so local testing works without this step.
 
 To check everything is connected, open the site with `?check=1` at the end of the address (for example <http://localhost:8000/?check=1>).
+
+## Spot the Liar
+
+A 3–12 player party game. Each round one random player is the liar (up to six rounds). The host picks a category and secret word from the built-in bank (34 categories, 12 words each). Everyone except the liar sees the word; the liar only sees the category.
+
+- One-word clues: 20 seconds per player, in turn; everyone sees the clues.
+- Discussion: 40 seconds, then a 20-second vote. You cannot vote for yourself. A strict majority is needed to catch the liar.
+- Reveal: everyone sees the liar and the word. If caught, the liar has 15 seconds to guess the word.
+- Points: liar escapes **+200**; liar caught but guesses correctly **+150**; liar caught and wrong means each correct voter **+100**.
+
+The word lives at `liarSecrets/<CODE>/<round>`. Rules let only the host write it during setup, only non-liars read it during the round, and everyone read it after the reveal. The host phone runs the timers; player phones own their own clue, vote and guess writes.
 
 ## Site counters
 

@@ -228,7 +228,8 @@ function enterRoom(code, uid, room, selectedGameId = '') {
     const gameId = r.meta.gameId || selectedGameId;
     const game = gameId ? gamesModule.getGame(gameId) : null;
     if (!game) return;
-    if (Object.keys(r.players || {}).length < game.minPlayers) return;
+    const count = Object.keys(r.players || {}).length;
+    if (count < game.minPlayers || (game.maxPlayers && count > game.maxPlayers)) return;
     autoStarted = true;
     session.startGame(game.id).catch((err) => {
       console.warn('Could not start the selected game', err);

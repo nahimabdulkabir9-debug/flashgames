@@ -87,7 +87,7 @@
         "game": {
           ".write": "auth != null && root.child('rooms').child($code).child('meta').child('hostUid').val() === auth.uid",
           "phase": {
-            ".validate": "newData.isString() && newData.val().matches(/^(pick|draw|over|final|play|vote)$/)"
+            ".validate": "newData.isString() && newData.val().matches(/^(pick|draw|over|final|play|vote|setup|clue|discuss|reveal)$/)"
           },
           "round": {
             ".validate": "newData.isNumber() && newData.val() >= 0"
@@ -115,6 +115,9 @@
             ".validate": "!newData.exists() || newData.isNumber()"
           },
           "voteEndsAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "guessEndsAt": {
             ".validate": "!newData.exists() || newData.isNumber()"
           },
           "stoppedBy": {
@@ -270,6 +273,56 @@
               ".validate": "$word.matches(/^[a-z]{3,10}$/) && newData.isString() && newData.val().length <= 128"
             }
           },
+          "liarOrder": {
+            "$i": {
+              ".validate": "$i.matches(/^[0-5]$/) && (!newData.exists() || (newData.isString() && newData.val().length > 0 && newData.val().length <= 128 && root.child('rooms').child($code).child('players').child(newData.val()).exists()))"
+            }
+          },
+          "clueOrder": {
+            "$i": {
+              ".validate": "$i.matches(/^[0-9]+$/) && (!newData.exists() || (newData.isString() && newData.val().length > 0 && newData.val().length <= 128 && root.child('rooms').child($code).child('players').child(newData.val()).exists()))"
+            }
+          },
+          "clueIndex": {
+            ".validate": "!newData.exists() || (newData.isNumber() && newData.val() >= 0)"
+          },
+          "currentCluer": {
+            ".validate": "!newData.exists() || (newData.isString() && newData.val().length > 0 && newData.val().length <= 128)"
+          },
+          "liar": {
+            ".validate": "!newData.exists() || (newData.isString() && newData.val().length > 0 && newData.val().length <= 128)"
+          },
+          "category": {
+            ".validate": "!newData.exists() || (newData.isString() && newData.val().length > 0 && newData.val().length <= 40)"
+          },
+          "caught": {
+            ".validate": "!newData.exists() || newData.isBoolean()"
+          },
+          "guessCorrect": {
+            ".validate": "!newData.exists() || newData.isBoolean()"
+          },
+          "clues": {
+            "$uid": {
+              ".write": "auth != null && auth.uid === $uid && root.child('rooms').child($code).child('players').child(auth.uid).exists() && root.child('rooms').child($code).child('game').child('phase').val() === 'clue' && root.child('rooms').child($code).child('game').child('currentCluer').val() === auth.uid",
+              ".validate": "!newData.exists() || ($uid === root.child('rooms').child($code).child('game').child('currentCluer').val() && newData.isString() && newData.val().matches(/^[^ ]{1,20}$/))"
+            }
+          },
+          "liarVotes": {
+            "$voter": {
+              ".write": "auth != null && auth.uid === $voter && root.child('rooms').child($code).child('players').child(auth.uid).exists() && root.child('rooms').child($code).child('game').child('phase').val() === 'vote' && !data.exists()",
+              ".validate": "!newData.exists() || ($voter === auth.uid && newData.hasChildren(['pick']))",
+              "pick": {
+                ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 128 && newData.val() !== $voter && root.child('rooms').child($code).child('players').child(newData.val()).exists()"
+              },
+              "$other": {
+                ".validate": false
+              }
+            }
+          },
+          "liarGuess": {
+            ".write": "auth != null && auth.uid === root.child('rooms').child($code).child('game').child('liar').val() && root.child('rooms').child($code).child('game').child('phase').val() === 'reveal' && root.child('rooms').child($code).child('game').child('caught').val() === true",
+            ".validate": "!newData.exists() || (auth.uid === root.child('rooms').child($code).child('game').child('liar').val() && newData.isString() && newData.val().length >= 1 && newData.val().length <= 30)"
+          },
           "$other": {
             ".validate": false
           }
@@ -305,6 +358,32 @@
           },
           "positions": {
             ".validate": "newData.isString() && newData.val().length <= 100"
+          },
+          "$other": {
+            ".validate": false
+          }
+        }
+      }
+    },
+    "liarSecrets": {
+      "$code": {
+        ".validate": "$code.matches(/^[A-Z]{5}$/)",
+        ".write": "auth != null && !newData.exists() && root.child('rooms').child($code).child('meta').child('hostUid').val() === auth.uid",
+        "$round": {
+          ".read": "auth != null && root.child('rooms').child($code).child('players').child(auth.uid).exists() && (data.child('liar').val() !== auth.uid || root.child('rooms').child($code).child('game').child('phase').val().matches(/^(reveal|over|final)$/))",
+          ".write": "auth != null && root.child('rooms').child($code).child('meta').child('hostUid').val() === auth.uid && root.child('rooms').child($code).child('game').child('phase').val() === 'setup' && newData.child('round').val() === root.child('rooms').child($code).child('game').child('round').val()",
+          ".validate": "$round.matches(/^[0-9]+$/) && (!newData.exists() || newData.hasChildren(['round', 'liar', 'category', 'word']))",
+          "round": {
+            ".validate": "newData.isNumber() && newData.val() >= 0"
+          },
+          "liar": {
+            ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 128 && root.child('rooms').child($code).child('players').child(newData.val()).exists()"
+          },
+          "category": {
+            ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 40"
+          },
+          "word": {
+            ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 30"
           },
           "$other": {
             ".validate": false

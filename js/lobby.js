@@ -87,9 +87,11 @@ export function renderLobby(container, session, { onLeave }) {
     const waitingFor = players.filter((p) => p.uid !== hostUid && !p.ready && p.online !== false);
     controls.append(
       chosen
-        ? el('p', { class: 'muted center' }, players.length >= chosen.minPlayers
-          ? `Starting ${chosen.emoji} ${chosen.name} now…`
-          : `Waiting for ${chosen.minPlayers - players.length} more player(s) to play ${chosen.name}…`)
+        ? el('p', { class: 'muted center' }, players.length < chosen.minPlayers
+          ? `Waiting for ${chosen.minPlayers - players.length} more player(s) to play ${chosen.name}…`
+          : chosen.maxPlayers && players.length > chosen.maxPlayers
+            ? `${chosen.name} works with up to ${chosen.maxPlayers} players. Remove ${players.length - chosen.maxPlayers} player(s) first.`
+            : `Starting ${chosen.emoji} ${chosen.name} now…`)
         : el('p', { class: 'muted center' }, waitingFor.length
           ? `Waiting for ${waitingFor.length} player(s) to get ready…`
           : 'Everyone is ready!'),
@@ -131,9 +133,15 @@ function chooseGame(session, playerCount) {
     actions: [
       ...GAMES.map((game) => ({
         label: `${game.emoji} ${game.name}`,
-        onClick: () => (playerCount < game.minPlayers
-          ? toast(`${game.name} needs at least ${game.minPlayers} players`)
-          : session.startGame(game.id).catch(() => toast('Could not start the game'))),
+        onClick: () => {
+          if (playerCount < game.minPlayers) {
+            toast(`${game.name} needs at least ${game.minPlayers} players`);
+          } else if (game.maxPlayers && playerCount > game.maxPlayers) {
+            toast(`${game.name} works with up to ${game.maxPlayers} players`);
+          } else {
+            session.startGame(game.id).catch(() => toast('Could not start the game'));
+          }
+        },
       })),
       { label: 'Cancel', style: 'secondary' },
     ],

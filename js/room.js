@@ -334,14 +334,16 @@ export class RoomSession {
     await update(ref(db, this.path('meta')), { gameId, status: 'playing' });
     // A previous game may have left secret words behind.
     await remove(ref(db, `gameSecrets/${this.code}`)).catch(() => {});
+    await remove(ref(db, `liarSecrets/${this.code}`)).catch(() => {});
   }
 
   /** Host only: end the game and go back to the lobby. */
   async endGame() {
     await update(ref(db, this.path()), { 'meta/status': 'lobby', 'meta/gameId': null, game: null });
-    // Pictionary keeps the drawer's word outside the room node so guessers
-    // cannot read it. Clear it when the game ends.
+    // Pictionary and Spot the Liar keep secret words outside the room node so
+    // other players cannot read them. Clear them when the game ends.
     await remove(ref(db, `gameSecrets/${this.code}`)).catch(() => {});
+    await remove(ref(db, `liarSecrets/${this.code}`)).catch(() => {});
   }
 
   /** Host only: make the room public or private. */

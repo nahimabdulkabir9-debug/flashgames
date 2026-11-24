@@ -158,6 +158,9 @@ test('the host can clear every per-round field', async () => {
   await assertSucceeds(update(ref(dbAs(HOST), `rooms/${ROOM}/game`), {
     pick: null, strokes: null, solved: null, guesses: null, repick: null,
     hint: null, word: null, hash: null, len: null, endsAt: null,
+    liar: null, category: null, caught: null, guessCorrect: null,
+    clues: null, liarVotes: null, liarGuess: null,
+    clueIndex: null, currentCluer: null, guessEndsAt: null, overAt: null, gain: null,
   }));
 });
 
@@ -190,6 +193,59 @@ test('the secret word is drawer-only until the round is over', async () => {
   });
   await assertSucceeds(get(ref(dbAs(GUEST), `gameSecrets/${ROOM}/0`)));
   await assertSucceeds(remove(ref(dbAs(HOST), `gameSecrets/${ROOM}`)));
+});
+
+test('spot the liar phases are accepted by the rules', async () => {
+  await seed();
+  for (const phase of ['setup', 'clue', 'discuss', 'reveal']) {
+    await assertSucceeds(set(ref(dbAs(HOST), `rooms/${ROOM}/game/phase`), phase));
+  }
+});
+
+test('only the current player can give a one-word clue', async () => {
+  await seed({
+    phase: 'clue',
+    game: { currentCluer: GUEST, liar: DRAWER, clueOrder: { 0: HOST, 1: DRAWER, 2: GUEST } },
+  });
+  const db = dbAs(GUEST);
+  await assertSucceeds(set(ref(db, `rooms/${ROOM}/game/clues/${GUEST}`), 'ocean'));
+  await assertFails(set(ref(db, `rooms/${ROOM}/game/clues/${GUEST}`), 'two words'));
+  await assertFails(set(ref(dbAs(HOST), `rooms/${ROOM}/game/clues/${HOST}`), 'ocean'));
+});
+
+test('players vote once for another player during the vote phase', async () => {
+  await seed({ phase: 'vote', game: { liar: DRAWER, liarOrder: { 0: DRAWER }, total: 1 } });
+  await assertSucceeds(set(ref(dbAs(GUEST), `rooms/${ROOM}/game/liarVotes/${GUEST}`), { pick: DRAWER }));
+  await assertFails(set(ref(dbAs(HOST), `rooms/${ROOM}/game/liarVotes/${HOST}`), { pick: HOST }));
+  await assertFails(set(ref(dbAs(HOST), `rooms/${ROOM}/game/liarVotes/${HOST}`), { pick: 'stranger-uid' }));
+  await assertFails(set(ref(dbAs(GUEST), `rooms/${ROOM}/game/liarVotes/${GUEST}`), { pick: HOST }));
+});
+
+test('only the liar can guess during the reveal, and only when caught', async () => {
+  await seed({ phase: 'reveal', game: { liar: DRAWER, caught: true, total: 1, liarOrder: { 0: DRAWER } } });
+  await assertSucceeds(set(ref(dbAs(DRAWER), `rooms/${ROOM}/game/liarGuess`), 'apple'));
+  await assertFails(set(ref(dbAs(GUEST), `rooms/${ROOM}/game/liarGuess`), 'apple'));
+
+  await env.withSecurityRulesDisabled(async (context) => {
+    await set(ref(context.database(), `rooms/${ROOM}/game/caught`), false);
+  });
+  await assertFails(set(ref(dbAs(DRAWER), `rooms/${ROOM}/game/liarGuess`), 'tiger'));
+});
+
+test('the liar secret is hidden until the reveal', async () => {
+  await seed({ phase: 'setup', game: { round: 0, liar: DRAWER, total: 1, liarOrder: { 0: DRAWER } } });
+  const secret = { round: 0, liar: DRAWER, category: 'Animals', word: 'Lion' };
+  await assertSucceeds(set(ref(dbAs(HOST), `liarSecrets/${ROOM}/0`), secret));
+  await assertSucceeds(set(ref(dbAs(HOST), `liarSecrets/${ROOM}/0`), { ...secret, word: 'Tiger' }));
+  await assertFails(set(ref(dbAs(GUEST), `liarSecrets/${ROOM}/0`), secret));
+  await assertFails(get(ref(dbAs(DRAWER), `liarSecrets/${ROOM}/0`)));
+  await assertSucceeds(get(ref(dbAs(GUEST), `liarSecrets/${ROOM}/0`)));
+
+  await env.withSecurityRulesDisabled(async (context) => {
+    await set(ref(context.database(), `rooms/${ROOM}/game/phase`), 'reveal');
+  });
+  await assertSucceeds(get(ref(dbAs(DRAWER), `liarSecrets/${ROOM}/0`)));
+  await assertSucceeds(remove(ref(dbAs(HOST), `liarSecrets/${ROOM}`)));
 });
 
 test('a free slot can be claimed and released by its owner', async () => {

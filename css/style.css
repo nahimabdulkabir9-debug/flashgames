@@ -583,3 +583,56 @@ main.home-page { max-width: 1120px; padding: 8px 20px 64px; }
   .game-card { min-height: 0; }
   .section-head { align-items: flex-start; flex-direction: column; }
 }
+
+/* ---------- Spot the Liar ---------- */
+.secret-word {
+  padding: 12px 14px;
+  border: 1px solid rgba(91, 75, 219, 0.35);
+  border-radius: 14px;
+  background: rgba(91, 75, 219, 0.1);
+  font-size: 1.02rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.secret-word.liar-only {
+  border-color: rgba(255, 152, 0, 0.55);
+  background: rgba(255, 152, 0, 0.12);
+}
+.secret-word .muted { display: block; margin-top: 4px; font-size: 0.85rem; }
+
+.clue-list { display: grid; gap: 8px; }
+.clue-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.clue-name { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+.clue-word {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 1rem;
+  letter-spacing: 0.02em;
+}
+
+.vote-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.vote-tile { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 56px; }
+.vote-tile span { overflow-wrap: anywhere; }
+
+.reveal-word {
+  margin: 6px 0;
+  font-size: 1.25rem;
+  text-align: center;
+}
+.reveal-word strong { color: var(--primary-dark); }
+
+@media (max-width: 560px) {
+  .vote-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .clue-row { align-items: flex-start; flex-direction: column; }
+}
