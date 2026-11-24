@@ -64,6 +64,18 @@ test('a player can create a public room', async () => {
   }));
 });
 
+test('a player can create a private room', async () => {
+  const code = 'YYYYY';
+  const db = dbAs(HOST);
+  await assertSucceeds(update(ref(db), {
+    [`rooms/${code}/meta`]: { hostUid: HOST, createdAt: serverTimestamp(), status: 'lobby', public: false },
+    [`rooms/${code}/slots/1`]: HOST,
+  }));
+  await assertSucceeds(set(ref(db, `rooms/${code}/players/${HOST}`), {
+    name: 'Host User', avatar: '🙂', joinedAt: serverTimestamp(), slot: '1', ready: false, online: true,
+  }));
+});
+
 test('only room members can read a room', async () => {
   await seed();
   await assertSucceeds(get(ref(dbAs(HOST), `rooms/${ROOM}`)));
