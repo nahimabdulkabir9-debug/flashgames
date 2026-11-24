@@ -3,6 +3,7 @@
 // where create() returns { update(room), destroy() }.
 import pictionary from './pictionary.js';
 import wordCookies from './wordcookies.js';
+import npat from './npat.js';
 
-export const GAMES = [pictionary, wordCookies];
+export const GAMES = [pictionary, wordCookies, npat];
 export const getGame = (id) => GAMES.find((g) => g.id === id);
