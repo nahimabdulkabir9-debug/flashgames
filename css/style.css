@@ -377,3 +377,9 @@ button:focus-visible, input:focus-visible, a:focus-visible {
 .share-row .btn:last-child:nth-child(odd) { grid-column: 1 / -1; }
 .room-code-card .btn { margin-top: 0; }
 .room-code-card p.muted { margin: 4px 0 14px; }
+
+/* ---------- Name, Place, Animal, Thing ---------- */
+.big-letter { font-size: 4.5rem; font-weight: 900; line-height: 1; color: var(--primary); }
+.npat-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.npat-row:last-child { border-bottom: 0; }
+.npat-row .muted { margin: 2px 0 0; }
