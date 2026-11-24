@@ -17,7 +17,7 @@ See [PROGRESS.md](PROGRESS.md) for what is built so far and what comes next.
 | `index.html` | The only HTML page. JavaScript draws every screen inside it. |
 | `css/style.css` | All styling: colours, light/dark mode, big touch-friendly buttons. |
 | `js/config.js` | App name and your Firebase web config. |
-| `js/firebase.js` | Connects to Firebase, signs in anonymously, server time helper. |
+| `js/firebase.js` | Connects to Firebase, signs in anonymously, records daily visitors, server time helper. |
 | `js/ui.js` | Safe helpers for building the page (`el`, `mount`, `toast`). |
 | `js/app.js` | Starts the app and picks the screen: home, lobby, or setup check. Rejoins your room after a refresh. |
 | `js/check.js` | The setup check screen. Open the site with `?check=1` to run it. |
@@ -48,6 +48,18 @@ See [PROGRESS.md](PROGRESS.md) for what is built so far and what comes next.
    - `localhost` is already in the list, so local testing works without this step.
 
 To check everything is connected, open the site with `?check=1` at the end of the address (for example <http://localhost:8000/?check=1>).
+
+## Daily visitor counts
+
+The app records a visit each time a browser loads the site. Because the key is `siteVisits/<YYYY-MM-DD>/<uid>`, each visitor is counted once per UTC day. To read it:
+
+1. Firebase Console → Realtime Database → Data.
+2. Expand `siteVisits`, then the date you want.
+3. Count the keys under that date. Each key is one anonymous visitor for that day.
+
+Only a visitor's own uid can be written, and visitors cannot read this data from the app. It stores no nickname or game data. A different device, private window, or cleared site data gets a new anonymous uid and counts as a new visitor.
+
+Counts start from the day this version goes live; earlier visits are not available. This change updates `firebase/database.rules.json`, so publish the rules too.
 
 ### Is it safe to put the Firebase config in a public repo?
 

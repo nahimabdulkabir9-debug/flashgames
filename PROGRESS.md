@@ -49,6 +49,7 @@ This file is the hand-over note. Anyone (or any new Claude session) picking up t
 - Game state is host-authoritative: the host writes phases/timers/scores; players write only their own answers, votes, checks, guesses and stop requests; the current Pictionary drawer writes strokes/hints, secret words and solved marks. The word lives in `gameSecrets/<CODE>/<round>` so guessers cannot read it during a round.
 - Host promotion is client-side: the earliest-joined online human takes over when the host has been offline for 6 s (`HOST_GRACE_MS` in room.js); the rules allow taking over only when the host is offline or gone.
 - Firebase project: `flashgames-5b774` (database in europe-west1). Rules must be re-published in the console every time `firebase/database.rules.json` changes.
+- Daily visitors are counted at `siteVisits/<YYYY-MM-DD>/<uid>` (UTC). `recordVisit()` in firebase.js writes the current anonymous uid once per loaded day; rules allow writing only your own uid and no app reads. Read counts in Firebase Console → Realtime Database → Data.
 - Repo: `nahimabdulkabir9-debug/flashgames`, work happens on branch `main`.
 - Live site: `https://nahimabdulkabir9-debug.github.io/flashgames/`.
 - Firebase SDK version is pinned in `js/firebase.js` (10.12.2). Change all three import URLs together.

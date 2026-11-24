@@ -75,6 +75,13 @@ export function signIn() {
   return uidPromise;
 }
 
+/** Record this anonymous visitor once per UTC day for simple daily counts. */
+export async function recordVisit(uid) {
+  const visitor = uid || await signIn();
+  const day = new Date().toISOString().slice(0, 10);
+  return set(ref(db, `siteVisits/${day}/${visitor}`), serverTimestamp());
+}
+
 /** True when Firebase refused a read/write (as opposed to a network error). */
 export function isPermissionDenied(err) {
   const code = String(err?.code || '');

@@ -64,7 +64,7 @@ async function start() {
 
   // Load the Firebase-dependent modules only after the config check.
   // They are small, so we load them all at once, in parallel.
-  const [{ signIn, onConnectionChange }, room] = await Promise.all([import('./firebase.js'), import('./room.js')]);
+  const [{ signIn, onConnectionChange, recordVisit }, room] = await Promise.all([import('./firebase.js'), import('./room.js')]);
   [homeModule, lobbyModule, gamesModule] = await Promise.all([import('./home.js'), import('./lobby.js'), import('./games/registry.js')]);
 
   // A persistent, quiet banner is better than a toast that disappears while
@@ -86,6 +86,10 @@ async function start() {
       el('a', { class: 'btn secondary', href: './?check=1' }, 'Run setup check')));
     return;
   }
+
+  // Privacy-light daily count: one entry per anonymous uid per UTC day.
+  // Never let analytics stop someone from playing.
+  recordVisit(uid).catch((err) => console.warn('Could not record the daily visit', err));
 
   // Which room should we be in? A ?room= link wins; otherwise the room
   // saved from last time (for when the address was lost).

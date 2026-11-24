@@ -76,6 +76,15 @@ test('a player can create a private room', async () => {
   }));
 });
 
+test('visitors can record one daily visit under their own uid', async () => {
+  const hostDb = dbAs(HOST);
+  await assertSucceeds(set(ref(hostDb, `siteVisits/2026-11-24/${HOST}`), serverTimestamp()));
+  await assertSucceeds(set(ref(hostDb, `siteVisits/2026-11-25/${HOST}`), serverTimestamp()));
+  await assertFails(set(ref(hostDb, `siteVisits/2026-11-24/${GUEST}`), serverTimestamp()));
+  await assertFails(set(ref(hostDb, `siteVisits/1124/${HOST}`), serverTimestamp()));
+  await assertFails(get(ref(hostDb, `siteVisits/2026-11-24`)));
+});
+
 test('only room members can read a room', async () => {
   await seed();
   await assertSucceeds(get(ref(dbAs(HOST), `rooms/${ROOM}`)));
