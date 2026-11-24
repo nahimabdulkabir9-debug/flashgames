@@ -10,6 +10,7 @@
 import { APP_NAME } from './config.js';
 import { el, mount, toast, showModal, copyText } from './ui.js';
 import { GAMES } from './games/registry.js';
+import { avatarEl } from './avatars.js';
 import { roomLink, MAX_PLAYERS_PER_ROOM } from './room.js';
 
 /**
@@ -62,7 +63,7 @@ export function renderLobby(container, session, { onLeave }) {
     const offline = p.online === false;
     const ready = isHost || p.ready;
     return el('li', { class: `player${offline ? ' offline' : ''}` },
-      el('span', { class: 'player-avatar', 'aria-hidden': 'true' }, p.avatar || '🙂'),
+      el('span', { class: 'player-avatar', 'aria-hidden': 'true' }, avatarEl(p.avatar, 44)),
       el('span', { class: 'player-name' },
         el('span', {}, p.name), // textContent: safe even if the name contains <tags>
         isMe ? el('span', { class: 'tag' }, 'you') : null,

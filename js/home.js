@@ -11,8 +11,10 @@ import { el, mount } from './ui.js';
 import { checkNickname, NAME_MAX } from './filter.js';
 import { normalizeCode, isValidCode, MAX_PLAYERS_PER_ROOM } from './room.js';
 import { load, save } from './storage.js';
+import { AVATAR_IDS, avatarEl } from './avatars.js';
 
-export const AVATARS = [
+export const AVATARS = AVATAR_IDS;
+const OLD_EMOJI_AVATARS = [
   '😎', '🦁', '🐼', '🐘', '🦅', '🦊', '🐙', '🦜',
   '🚀', '🍕', '🍔', '🌮', '🍩', '🍉', '🍍', '🌽',
   '⚽', '🎧', '🎤', '🥁', '👑', '🔥', '⚡', '🎮',
@@ -52,7 +54,7 @@ export function renderHome(container, { invitedCode = '', onCreate, onJoin, onQu
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
       });
     },
-  }, emoji));
+  }, avatarEl(emoji, 0)));
 
   // ---- Join code ----
   const codeInput = el('input', {
@@ -142,7 +144,7 @@ export function renderHome(container, { invitedCode = '', onCreate, onJoin, onQu
   if (watchPublic) {
     watchPublic((rooms) => {
       publicList.replaceChildren(...(rooms.length ? rooms.map((r) => el('li', { class: 'player' },
-        el('span', { class: 'player-avatar', 'aria-hidden': 'true' }, r.avatar),
+        el('span', { class: 'player-avatar', 'aria-hidden': 'true' }, avatarEl(r.avatar, 44)),
         el('span', { class: 'player-name' }, `${r.hostName}'s room`),
         el('span', { class: 'player-status' }, `${r.players}/${MAX_PLAYERS_PER_ROOM}`),
         el('button', {
