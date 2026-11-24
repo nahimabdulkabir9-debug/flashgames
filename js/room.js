@@ -65,8 +65,9 @@ export async function createRoom(profile, { isPublic = false } = {}) {
     const metaSnap = await get(ref(db, `rooms/${code}/meta`));
     if (metaSnap.exists()) continue; // code taken, try another
 
-    // One multi-path update writes the room and our player entry together:
-    // either both succeed or neither does.
+    // Create the room and claim slot 1 atomically, then add our player. The
+    // player write needs the claimed slot to already exist in the rules, so
+    // it cannot be part of the same update.
     try {
       await update(ref(db), {
         [`rooms/${code}/meta`]: {
@@ -76,13 +77,22 @@ export async function createRoom(profile, { isPublic = false } = {}) {
           public: Boolean(isPublic),
         },
         [`rooms/${code}/slots/1`]: uid,
-        [`rooms/${code}/players/${uid}`]: newPlayer(profile, '1'),
       });
-      return code;
     } catch (err) {
       // Someone else grabbed the same code between our read and write.
       // The rules refuse the overwrite, so try another code.
       if (!isPermissionDenied(err)) throw err;
+      continue;
+    }
+
+    try {
+      await set(ref(db, `rooms/${code}/players/${uid}`), newPlayer(profile, '1'));
+      return code;
+    } catch (err) {
+      // Don't leave a room shell behind if the player write failed.
+      await remove(ref(db, `rooms/${code}/slots/1`)).catch(() => {});
+      await remove(ref(db, `rooms/${code}/meta`)).catch(() => {});
+      throw err;
     }
   }
   throw new RoomError('Could not find a free room code. Please try again.');

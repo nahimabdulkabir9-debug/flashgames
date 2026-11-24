@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import {
   initializeTestEnvironment, assertFails, assertSucceeds,
 } from '@firebase/rules-unit-testing';
-import { ref, set, get, update, remove } from 'firebase/database';
+import { ref, set, get, update, remove, serverTimestamp } from 'firebase/database';
 
 const ROOM = 'ABCDE';
 const HOST = 'host-uid';
@@ -48,6 +48,21 @@ async function seed({ players = [HOST, DRAWER, GUEST], phase = 'pick', game = {}
     });
   });
 }
+
+test('a player can create a public room', async () => {
+  const code = 'ZZZZZ';
+  const db = dbAs(HOST);
+  await assertSucceeds(update(ref(db), {
+    [`rooms/${code}/meta`]: { hostUid: HOST, createdAt: serverTimestamp(), status: 'lobby', public: true },
+    [`rooms/${code}/slots/1`]: HOST,
+  }));
+  await assertSucceeds(set(ref(db, `rooms/${code}/players/${HOST}`), {
+    name: 'Host User', avatar: '🙂', joinedAt: serverTimestamp(), slot: '1', ready: false, online: true,
+  }));
+  await assertSucceeds(set(ref(db, `publicRooms/${code}`), {
+    hostName: 'Host User', avatar: '🙂', players: 1, updatedAt: serverTimestamp(),
+  }));
+});
 
 test('only room members can read a room', async () => {
   await seed();
