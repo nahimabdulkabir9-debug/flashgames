@@ -17,12 +17,12 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="./" aria-label="Home">
+    <a class="brand" href="./?home=1" aria-label="Home">
       <span class="logo" aria-hidden="true">⚡</span>
       <span id="brand-name">FlashGames</span>
     </a>
     <div class="topbar-actions">
-      <button id="theme-btn" class="icon-btn" type="button" aria-label="Switch light or dark mode">🌓</button>
+      <button id="theme-btn" class="icon-btn" type="button" aria-label="Switch light or dark mode" aria-pressed="false">🌓</button>
     </div>
   </header>
   <div id="connection-banner" class="connection-banner" role="status" hidden>Offline — reconnecting…</div>
@@ -35,5 +35,32 @@
 
   <noscript>FlashGames needs JavaScript switched on.</noscript>
   <script type="module" src="./js/app.js"></script>
+  <script>
+    // Last-resort fallback: if the module or Firebase CDN fails before app.js
+    // can draw anything, replace the permanent "Loading…" with a real message.
+    function flashgamesLoadFailed() {
+      var app = document.getElementById('app');
+      if (!app || app.textContent.indexOf('Loading') === -1) return;
+      app.textContent = '';
+      var card = document.createElement('section');
+      card.className = 'card stack';
+      var title = document.createElement('h2');
+      title.textContent = "Can't load 😕";
+      var text = document.createElement('p');
+      text.textContent = 'Check your internet connection and refresh the page.';
+      var link = document.createElement('a');
+      link.className = 'btn secondary';
+      link.href = './?check=1';
+      link.textContent = 'Run setup check';
+      card.append(title, text, link);
+      app.append(card);
+    }
+    window.addEventListener('error', function (event) {
+      // Ignore a failed favicon or other resource; only module/script errors
+      // can leave the app stuck on "Loading…".
+      if (!event.target || event.target.tagName === 'SCRIPT') flashgamesLoadFailed();
+    }, true);
+    window.addEventListener('unhandledrejection', flashgamesLoadFailed);
+  </script>
 </body>
 </html>

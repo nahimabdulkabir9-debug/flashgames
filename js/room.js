@@ -15,7 +15,7 @@
 // =============================================================
 
 import {
-  db, signIn, serverNow, ref, get, set, update, remove, runTransaction, onValue, onDisconnect, serverTimestamp,
+  db, signIn, serverNow, serverTimeReady, ref, get, set, update, remove, runTransaction, onValue, onDisconnect, serverTimestamp,
   isPermissionDenied,
 } from './firebase.js';
 
@@ -27,6 +27,10 @@ const CODE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 // How long the host may be offline before someone else takes over.
 // Long enough that a host who just refreshes the page keeps the role.
 const HOST_GRACE_MS = 6000;
+// A client that crashed with no onDisconnect still stops heartbeating. Treat
+// a lastSeen older than this as away, even if its online flag is stuck true.
+const HOST_STALE_MS = 45000;
+const PRESENCE_BEAT_MS = 15000;
 
 /** Friendly error the screens can show directly. */
 export class RoomError extends Error {}
@@ -209,7 +213,11 @@ export class RoomSession {
     this.room = null;           // latest { meta, players, kicked }
     this.unsubscribers = [];
     this.hostTimer = null;
+    this.beat = null;
+    this.listedKey = null;
+    this.started = false;
     this.left = false;
+    this.stopPresence = null;
   }
 
   path(sub = '') { return `rooms/${this.code}${sub ? `/${sub}` : ''}`; }
@@ -217,18 +225,26 @@ export class RoomSession {
   get isHost() { return this.room?.meta?.hostUid === this.uid; }
 
   start() {
+    if (this.started) return; // a second start() must not leak a second beat
+    this.started = true;
     // 1) Presence: whenever our connection comes (back) up, mark us online
     //    and tell Firebase to mark us offline if the connection drops.
-    const stopPresence = onValue(ref(db, '.info/connected'), async (snap) => {
+    //    Write online FIRST so a failed onDisconnect registration cannot
+    //    leave us permanently invisible.
+    this.stopPresence = onValue(ref(db, '.info/connected'), async (snap) => {
       if (snap.val() !== true || this.left) return;
       try {
+        await update(this.meRef, { online: true, lastSeen: serverTimestamp() });
+        if (this.left) return;
         await onDisconnect(this.meRef).update({ online: false, lastSeen: serverTimestamp() });
-        await update(this.meRef, { online: true });
+        if (this.left) return;
         this.listedKey = null;
         if (this.room) this.syncPublic();
-      } catch { /* removed from room; the room listener handles it */ }
+      } catch (err) {
+        if (!isPermissionDenied(err) && !this.left) console.warn('Room presence update failed', err);
+      }
     });
-    this.unsubscribers.push(stopPresence);
+    this.unsubscribers.push(this.stopPresence);
 
     // 2) Listen to the whole room and redraw on every change.
     const stopRoom = onValue(ref(db, this.path()), (snap) => {
@@ -257,10 +273,16 @@ export class RoomSession {
       this.handleRemoved(kicked ? 'The host removed you from the room.' : 'You are no longer in this room.');
     });
     this.unsubscribers.push(stopRoom);
-    // Keep our public listing fresh while we are the host.
+    // Heartbeat: keep our own presence and public listing fresh, and re-run
+    // host promotion even if the room snapshot did not change.
     this.beat = setInterval(() => {
-      if (this.listedKey && this.isHost) update(ref(db, `publicRooms/${this.code}`), { updatedAt: serverTimestamp() }).catch(() => {});
-    }, 30000);
+      if (this.left) return;
+      update(this.meRef, { online: true, lastSeen: serverTimestamp() }).catch(() => {});
+      if (this.room) this.checkHost();
+      if (this.listedKey && this.isHost) {
+        update(ref(db, `publicRooms/${this.code}`), { updatedAt: serverTimestamp() }).catch(() => {});
+      }
+    }, PRESENCE_BEAT_MS);
   }
 
   /** Players sorted by when they joined, as [{ uid, ...data }]. */
@@ -278,13 +300,16 @@ export class RoomSession {
   checkHost() {
     const { meta, players } = this.room;
     const host = players[meta.hostUid];
-    const hostAway = !host || host.online === false;
+    const stale = (p) => !p || p.online === false
+      || (typeof p.lastSeen === 'number' && serverNow() - p.lastSeen > HOST_STALE_MS);
+    const hostAway = stale(host);
     if (!hostAway) {
       clearTimeout(this.hostTimer);
       this.hostTimer = null;
       return;
     }
-    const nextHost = this.playerList().find((p) => p.online !== false && !p.isBot);
+    const candidates = this.playerList().filter((p) => !stale(p) && !p.isBot);
+    const nextHost = candidates[0];
     if (!nextHost || nextHost.uid !== this.uid || this.hostTimer) return;
 
     const wait = host ? HOST_GRACE_MS : 0; // host left on purpose: take over now
@@ -292,7 +317,7 @@ export class RoomSession {
       this.hostTimer = null;
       if (this.left || !this.room) return;
       const current = this.room.players[this.room.meta.hostUid];
-      if (current && current.online !== false) return; // host came back
+      if (current && !stale(current)) return; // host came back
       try {
         await set(ref(db, this.path('meta/hostUid')), this.uid);
       } catch (err) {
@@ -309,14 +334,17 @@ export class RoomSession {
     const { meta, players } = this.room;
     const entry = ref(db, `publicRooms/${this.code}`);
     if (!(meta.public === true && meta.status === 'lobby')) {
-      if (this.listedKey) { this.listedKey = null; await remove(entry).catch(() => {}); }
+      // Remove unconditionally: a refresh may have lost listedKey. This is
+      // harmless when the entry does not exist.
+      this.listedKey = null;
+      await onDisconnect(entry).cancel().catch(() => {});
+      await remove(entry).catch(() => {});
       return;
     }
     const me = players[this.uid];
     if (!me) return; // removed while a public-listing update was in flight
     const key = `${meta.gameId || ''}|${Object.keys(players).length}|${me.name}|${me.avatar}`;
     if (key === this.listedKey) return;
-    this.listedKey = key;
     try {
       await set(entry, {
         hostName: me.name,
@@ -325,25 +353,40 @@ export class RoomSession {
         ...(meta.gameId ? { gameId: meta.gameId } : {}),
         updatedAt: serverTimestamp(),
       });
-      await onDisconnect(entry).remove();
-    } catch { this.listedKey = null; }
+      // A failed onDisconnect registration must not disable the heartbeat.
+      await onDisconnect(entry).remove().catch(() => {});
+      this.listedKey = key;
+    } catch (err) {
+      if (!isPermissionDenied(err)) console.warn('Public room listing failed', err);
+    }
   }
 
   /** Host only: start a game from the registry. */
   async startGame(gameId) {
-    await update(ref(db, this.path('meta')), { gameId, status: 'playing' });
-    // A previous game may have left secret words behind.
+    // Clear old secrets FIRST, then open the new game. Doing it in the other
+    // order can delete a fresh secret written in the gap.
     await remove(ref(db, `gameSecrets/${this.code}`)).catch(() => {});
     await remove(ref(db, `liarSecrets/${this.code}`)).catch(() => {});
+    await remove(ref(db, `liarAssignments/${this.code}`)).catch(() => {});
+    await update(ref(db), {
+      [`rooms/${this.code}/meta/gameId`]: gameId,
+      [`rooms/${this.code}/meta/status`]: 'playing',
+      [`rooms/${this.code}/game`]: null,
+    });
   }
 
   /** Host only: end the game and go back to the lobby. */
   async endGame() {
-    await update(ref(db, this.path()), { 'meta/status': 'lobby', 'meta/gameId': null, game: null });
-    // Pictionary and Spot the Liar keep secret words outside the room node so
-    // other players cannot read them. Clear them when the game ends.
-    await remove(ref(db, `gameSecrets/${this.code}`)).catch(() => {});
-    await remove(ref(db, `liarSecrets/${this.code}`)).catch(() => {});
+    // Pictionary and Spot the Liar keep secret words outside the room node.
+    // Clear everything in one atomic write so no new round can race it.
+    await update(ref(db), {
+      [`rooms/${this.code}/meta/status`]: 'lobby',
+      [`rooms/${this.code}/meta/gameId`]: null,
+      [`rooms/${this.code}/game`]: null,
+      [`gameSecrets/${this.code}`]: null,
+      [`liarSecrets/${this.code}`]: null,
+      [`liarAssignments/${this.code}`]: null,
+    });
   }
 
   /** Host only: make the room public or private. */
@@ -371,29 +414,36 @@ export class RoomSession {
   async leave() {
     this.left = true;
     try {
-      if (this.isHost) await remove(ref(db, `publicRooms/${this.code}`)).catch(() => {});
-      await onDisconnect(this.meRef).cancel();
-
-      const slots = Object.keys(this.room?.slots || {});
+      // Remove our membership BEFORE cancelling the safety net. If cancel()
+      // or the removal fails, onDisconnect still has a chance to mark us
+      // offline instead of leaving a ghost member with no fallback.
+      const slots = Object.entries(this.room?.slots || {})
+        .filter(([, uid]) => uid).map(([slot]) => slot);
       const mySlot = this.room?.players?.[this.uid]?.slot;
       const lastOne = slots.length
         ? slots.length === 1 && slots[0] === mySlot
         : this.playerList().length === 1;
 
+      // Remove the listing while we are still the host. After the room is
+      // gone nobody has permission to remove it (except stale-listing cleanup).
+      if (this.isHost) await remove(ref(db, `publicRooms/${this.code}`)).catch(() => {});
+
       if (lastOne) {
-        // Last player out: close the room instead of leaving an empty
-        // shell behind. The rules check that no other slot is claimed.
         await remove(ref(db, this.path()));
       } else {
         const changes = {};
         if (this.isHost) {
-          const next = this.playerList().find((p) => p.uid !== this.uid && p.online !== false && !p.isBot);
-          if (next) changes[`${this.path()}/meta/hostUid`] = next.uid;
+          const candidates = this.playerList().filter((p) => p.uid !== this.uid && p.online !== false && !p.isBot);
+          if (candidates[0]) changes[`${this.path()}/meta/hostUid`] = candidates[0].uid;
         }
         if (mySlot) changes[`${this.path()}/slots/${mySlot}`] = null;
         changes[`${this.path()}/players/${this.uid}`] = null;
         await update(ref(db), changes);
       }
+      if (this.isHost) {
+        await onDisconnect(ref(db, `publicRooms/${this.code}`)).cancel().catch(() => {});
+      }
+      await onDisconnect(this.meRef).cancel().catch(() => {});
     } catch (err) {
       console.warn('Leave failed', err);
     }
@@ -410,22 +460,30 @@ export class RoomSession {
   stop() {
     clearTimeout(this.hostTimer);
     clearInterval(this.beat);
-    this.unsubscribers.forEach((unsubscribe) => unsubscribe());
+    this.hostTimer = null;
+    this.beat = null;
+    this.listedKey = null;
+    this.unsubscribers.forEach((unsubscribe) => { try { unsubscribe(); } catch { /* already stopped */ } });
     this.unsubscribers = [];
+    this.stopPresence = null;
+    this.started = false;
   }
 }
 
 // ---------- Public rooms ----------
 const FRESH_MS = 90000; // hide listings whose host has not refreshed them for 90 s
 const STALE_MS = 120000; // rules allow anyone to delete listings this old
+let timeReady = false;
+serverTimeReady.then(() => { timeReady = true; });
 
 function allPublicRooms(value) {
   return Object.entries(value || {}).map(([code, r]) => ({ code, ...r }));
 }
 function isFresh(room) {
-  return serverNow() - (room.updatedAt || 0) < FRESH_MS;
+  return !timeReady || serverNow() - (room.updatedAt || 0) < FRESH_MS;
 }
 function pruneStale(rooms) {
+  if (!timeReady) return; // a wrong phone clock must never delete live rooms
   rooms
     .filter((r) => serverNow() - (r.updatedAt || 0) >= STALE_MS)
     .forEach((r) => remove(ref(db, `publicRooms/${r.code}`)).catch(() => {}));
@@ -443,7 +501,14 @@ function freshRooms(value) {
 
 /** Live list of open public rooms. Returns a function that stops listening. */
 export function watchPublicRooms(callback) {
-  return onValue(ref(db, 'publicRooms'), (snap) => callback(freshRooms(snap.val())), () => callback([]));
+  let last = [];
+  return onValue(ref(db, 'publicRooms'), (snap) => {
+    last = freshRooms(snap.val());
+    callback(last);
+  }, (err) => {
+    console.warn('Public room list lost connection', err);
+    callback(last); // keep the last good list instead of flashing "No rooms"
+  });
 }
 
 /** Join a random open public room, or start a new public one if none is open. */
@@ -452,7 +517,7 @@ export async function quickPlay(profile, gameId = '') {
   // A game chosen from the homepage gets its own public room so everyone
   // who joins is playing the same game. app.js starts it when enough arrive.
   if (gameId) return createRoom(profile, { isPublic: true, gameId });
-  const open = freshRooms((await get(ref(db, 'publicRooms'))).val());
+  const open = openRooms(allPublicRooms((await get(ref(db, 'publicRooms'))).val()));
   while (open.length) {
     const [pick] = open.splice(Math.floor(Math.random() * open.length), 1);
     try { return await joinRoom(pick.code, profile); } catch { /* try the next one */ }

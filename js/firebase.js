@@ -7,7 +7,7 @@
 // instead of talking to the CDN directly.
 // =============================================================
 
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import { getApp, getApps, initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
   getAuth, signInAnonymously, onAuthStateChanged, connectAuthEmulator,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
@@ -46,7 +46,8 @@ const config = usingEmulator
       databaseURL: `http://${EMULATOR.host}:${EMULATOR.databasePort}?ns=demo-flashgames` }
   : firebaseConfig;
 
-const app = initializeApp(config);
+// getApps() keeps this module safe if it is ever evaluated twice.
+const app = getApps().length ? getApp() : initializeApp(config);
 export const auth = getAuth(app);
 export const db = getDatabase(app);
 
@@ -62,15 +63,37 @@ if (usingEmulator) {
 let uidPromise = null;
 export function signIn() {
   if (!uidPromise) {
-    uidPromise = new Promise((resolve, reject) => {
-      const stop = onAuthStateChanged(auth, (user) => {
-        if (user) { stop(); resolve(user.uid); }
-      }, reject);
-      // If nobody is signed in yet, sign in anonymously.
-      signInAnonymously(auth).catch(reject);
+    const pending = new Promise((resolve, reject) => {
+      // A restored session is already signed in; do not make a second call.
+      if (auth.currentUser) {
+        resolve(auth.currentUser.uid);
+        return;
+      }
+      let settled = false;
+      let starting = false;
+      let stop = () => {};
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        stop(); // always detach the observer, on success AND failure
+        callback(value);
+      };
+      stop = onAuthStateChanged(auth, (user) => {
+        if (user) {
+          finish(resolve, user.uid);
+          return;
+        }
+        // The observer can fire null more than once before sign-in settles.
+        if (starting) return;
+        starting = true;
+        signInAnonymously(auth)
+          .then((credential) => finish(resolve, credential.user.uid))
+          .catch((err) => finish(reject, err));
+      });
     });
+    uidPromise = pending;
     // A failed attempt must not poison every later call: allow a retry.
-    uidPromise.catch(() => { uidPromise = null; });
+    pending.catch(() => { if (uidPromise === pending) uidPromise = null; });
   }
   return uidPromise;
 }
@@ -78,8 +101,8 @@ export function signIn() {
 /** Record this anonymous visitor once per UTC day for simple daily counts. */
 export async function recordVisit(uid) {
   const visitor = uid || await signIn();
-  const day = new Date().toISOString().slice(0, 10);
-  return set(ref(db, `siteVisits/${day}/${visitor}`), serverTimestamp());
+  await serverTimeReady;
+  return set(ref(db, `siteVisits/${serverUtcDay()}/${visitor}`), serverTimestamp());
 }
 
 /** True when Firebase refused a read/write (as opposed to a network error). */
@@ -102,7 +125,16 @@ export function onConnectionChange(callback) {
 // the difference between our clock and the server's, so timers agree
 // on every phone. Use serverNow() instead of Date.now() for game timers.
 let serverOffset = 0;
-onValue(ref(db, '.info/serverTimeOffset'), (snap) => { serverOffset = snap.val() || 0; });
+let markTimeReady = () => {};
+export const serverTimeReady = new Promise((resolve) => { markTimeReady = resolve; });
+onValue(ref(db, '.info/serverTimeOffset'), (snap) => {
+  serverOffset = Number(snap.val()) || 0;
+  markTimeReady();
+});
 export function serverNow() {
   return Date.now() + serverOffset;
+}
+/** UTC day according to Firebase, not the phone clock. */
+export function serverUtcDay() {
+  return new Date(serverNow()).toISOString().slice(0, 10);
 }

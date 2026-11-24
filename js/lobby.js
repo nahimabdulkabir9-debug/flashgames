@@ -43,13 +43,16 @@ export function renderLobby(container, session, { onLeave }) {
   if (navigator.share) {
     shareButtons.push(el('button', {
       class: 'btn secondary', type: 'button',
-      onclick: () => navigator.share({ title: APP_NAME, text: shareText, url: link }).catch(() => {}),
+      onclick: () => navigator.share({ title: APP_NAME, text: shareText, url: link })
+        .catch((err) => { if (err?.name !== 'AbortError') toast('Sharing was cancelled or unavailable'); }),
     }, '📤 Share'));
   }
 
   const codeCard = el('section', { class: 'card room-code-card' },
     el('p', { class: 'label' }, 'Room code'),
-    el('p', { class: 'room-code', 'aria-label': `Room code ${session.code.split('').join(' ')}` }, session.code),
+    el('p', { class: 'room-code' },
+      el('span', { 'aria-hidden': 'true' }, session.code),
+      el('span', { class: 'sr-only' }, `Room code ${session.code.split('').join(' ')}`)),
     el('div', { class: 'share-row' }, shareButtons),
     el('p', { class: 'muted center' }, isPublic ? '🌍 Public: anyone can find this room' : '🔒 Private: code or link only'),
     session.isHost ? el('button', {
@@ -91,7 +94,7 @@ export function renderLobby(container, session, { onLeave }) {
           ? `Waiting for ${chosen.minPlayers - players.length} more player(s) to play ${chosen.name}…`
           : chosen.maxPlayers && players.length > chosen.maxPlayers
             ? `${chosen.name} works with up to ${chosen.maxPlayers} players. Remove ${players.length - chosen.maxPlayers} player(s) first.`
-            : `Starting ${chosen.emoji} ${chosen.name} now…`)
+            : `Ready to start ${chosen.emoji} ${chosen.name} — tap Start game.`)
         : el('p', { class: 'muted center' }, waitingFor.length
           ? `Waiting for ${waitingFor.length} player(s) to get ready…`
           : 'Everyone is ready!'),
@@ -105,7 +108,7 @@ export function renderLobby(container, session, { onLeave }) {
       el('p', { class: 'muted center' }, 'The host will start the game when everyone is ready.'),
       el('button', {
         class: `btn${me.ready ? ' secondary' : ''}`, type: 'button',
-        onclick: () => session.setReady(!me.ready),
+        onclick: () => session.setReady(!me.ready).catch(() => toast('Could not save — check your connection')),
       }, me.ready ? '✋ Not ready yet' : "✅ I'm ready"),
     );
   }

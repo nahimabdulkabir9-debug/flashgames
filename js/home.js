@@ -43,8 +43,10 @@ export function renderHome(container, {
   invitedCode = '', onCreate, onJoin, onQuick, watchPublic, watchStats,
 }) {
   const saved = load('profile', {});
+  const oldIndex = OLD_EMOJI_AVATARS.indexOf(saved.avatar);
   let avatar = AVATARS.includes(saved.avatar) ? saved.avatar
-    : AVATARS[Math.floor(Math.random() * AVATARS.length)];
+    : oldIndex >= 0 ? AVATARS[oldIndex % AVATARS.length]
+      : AVATARS[Math.floor(Math.random() * AVATARS.length)];
 
   // ---- Nickname ----
   const nameInput = el('input', {
@@ -58,7 +60,7 @@ export function renderHome(container, {
   const avatarButtons = AVATARS.map((emoji) => el('button', {
     type: 'button',
     class: `avatar-option${emoji === avatar ? ' selected' : ''}`,
-    'aria-label': `Avatar ${emoji}`,
+    'aria-label': `Avatar ${Number(emoji.slice(1)) || emoji}`,
     'aria-pressed': emoji === avatar ? 'true' : 'false',
     onclick: (event) => {
       avatar = emoji;
@@ -77,7 +79,13 @@ export function renderHome(container, {
     placeholder: 'ABCDE', 'aria-label': 'Room code', enterkeyhint: 'go',
   });
   codeInput.value = invitedCode;
-  codeInput.addEventListener('input', () => { codeInput.value = normalizeCode(codeInput.value); });
+  codeInput.addEventListener('input', () => {
+    const cleaned = normalizeCode(codeInput.value);
+    if (cleaned === codeInput.value) return;
+    const at = codeInput.selectionStart;
+    codeInput.value = cleaned;
+    try { codeInput.setSelectionRange(at, at); } catch { /* older browsers */ }
+  });
 
   // Check the form and return the profile, or show an error and return null.
   function readProfile() {
@@ -94,8 +102,12 @@ export function renderHome(container, {
   }
 
   // Disable every action button while Firebase is working, so double taps
-  // don't create two rooms or start two games.
+  // don't create two rooms or start two games. The module-level flag also
+  // survives a live public-list re-render replacing the clicked button.
+  let actionBusy = false;
   async function busy(button, task) {
+    if (actionBusy) return;
+    actionBusy = true;
     errorBox.textContent = '';
     const all = [...container.querySelectorAll('[data-busy]')];
     all.forEach((b) => { b.disabled = true; });
@@ -106,7 +118,9 @@ export function renderHome(container, {
     } catch (err) {
       console.error(err);
       errorBox.textContent = err.message || 'Something went wrong. Check your internet and try again.';
-      all.forEach((b) => { b.disabled = false; });
+    } finally {
+      actionBusy = false;
+      container.querySelectorAll('[data-busy]').forEach((b) => { b.disabled = false; });
       button.textContent = label;
     }
   }
@@ -118,6 +132,11 @@ export function renderHome(container, {
       if (profile) busy(createBtn, () => onCreate(profile, { isPublic }));
     },
   }, '🎉 Create a room');
+  nameInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    createBtn.click();
+  });
 
   const joinBtn = el('button', {
     class: 'btn warm', type: 'button', 'data-busy': 'true',
@@ -140,13 +159,19 @@ export function renderHome(container, {
   const typeNote = el('p', { class: 'muted center' }, 'Only people with your code or link can join.');
   const typeBtns = [['🔒 Private', false], ['🌍 Public', true]].map(([label, value]) => el('button', {
     type: 'button', class: `seg-btn${value ? '' : ' selected'}`,
+    'aria-pressed': value ? 'false' : 'true',
     onclick: () => {
       isPublic = value;
-      typeBtns.forEach((b, i) => b.classList.toggle('selected', (i === 1) === value));
+      typeBtns.forEach((b, i) => {
+        const on = (i === 1) === value;
+        b.classList.toggle('selected', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
       typeNote.textContent = value ? 'Anyone can find and join from the public list.' : 'Only people with your code or link can join.';
     },
   }, label));
-  const typeRow = el('div', { class: 'stack' }, el('div', { class: 'seg' }, typeBtns), typeNote);
+  const typeRow = el('div', { class: 'stack' },
+    el('div', { class: 'seg', role: 'group', 'aria-label': 'Room type' }, typeBtns), typeNote);
 
   // ---- Public rooms list + Quick play ----
   const quickBtn = el('button', {
@@ -161,16 +186,19 @@ export function renderHome(container, {
     watchPublic((rooms) => {
       publicList.replaceChildren(...(rooms.length ? rooms.map((r) => {
         const game = getGame(r.gameId);
+        const joinMini = el('button', {
+          class: 'btn join-mini', type: 'button', 'data-busy': 'true',
+          onclick: () => { const p = readProfile(); if (p) busy(joinMini, () => onJoin(r.code, p)); },
+        }, 'Join');
         return el('li', { class: 'player' },
           el('span', { class: 'player-avatar', 'aria-hidden': 'true' }, avatarEl(r.avatar, 44)),
           el('span', { class: 'player-name' }, `${r.hostName}'s room`),
           el('span', { class: 'player-status' },
             `${game ? `${game.emoji} ${game.shortName}` : 'Open room'} · ${r.players}/${MAX_PLAYERS_PER_ROOM}`),
-          el('button', {
-            class: 'btn join-mini', type: 'button', 'data-busy': 'true',
-            onclick: () => { const p = readProfile(); if (p) busy(quickBtn, () => onJoin(r.code, p)); },
-          }, 'Join'));
+          joinMini);
       }) : [el('li', { class: 'muted' }, 'No public rooms right now. Create one!')]));
+      // A snapshot can arrive mid-join; keep buttons disabled until it finishes.
+      if (actionBusy) container.querySelectorAll('[data-busy]').forEach((b) => { b.disabled = true; });
     });
   }
 
@@ -207,7 +235,7 @@ export function renderHome(container, {
     el('label', { for: 'name', class: 'label' }, 'Nickname'),
     nameInput,
     el('p', { class: 'label' }, 'Pick your avatar'),
-    el('div', { class: 'avatar-grid' }, avatarButtons),
+    el('div', { class: 'avatar-grid', role: 'group', 'aria-label': 'Pick your avatar' }, avatarButtons),
     errorBox);
 
   const createCard = el('section', { class: 'card stack' },

@@ -30,7 +30,7 @@ export async function runConnectionCheck(app) {
     el('section', { class: 'card' },
       el('h2', {}, 'Setup check'),
       el('ul', { class: 'checks' }, configRow.row, authRow.row, liveRow.row, writeRow.row)),
-    el('a', { class: 'btn secondary', href: './' }, 'Back to home'),
+    el('a', { class: 'btn secondary', href: './?home=1' }, 'Back to home'),
   );
 
   // Load firebase.js only now, so a missing config shows a clear message
@@ -39,20 +39,34 @@ export async function runConnectionCheck(app) {
     configRow.fail('not set: paste your config into js/config.js');
     return;
   }
-  const fb = await import('./firebase.js');
+  let fb;
+  try {
+    fb = await import('./firebase.js');
+  } catch (err) {
+    console.error(err);
+    configRow.fail('Firebase SDK did not load — check your internet');
+    authRow.fail('not tested');
+    liveRow.fail('not tested');
+    writeRow.fail('not tested');
+    return;
+  }
   const { ref, set, get, serverTimestamp } = fb;
   configRow.pass(fb.usingEmulator ? 'using local emulator' : 'OK');
+  let stage = 'auth';
+  let stopLive = null;
 
   try {
     const uid = await fb.signIn();
     authRow.pass(`OK (you are ${uid.slice(0, 6)}…)`);
+    stage = 'live';
 
-    fb.onConnectionChange((online) => {
+    stopLive = fb.onConnectionChange((online) => {
       if (online) { liveRow.row.classList.remove('bad'); liveRow.pass('online'); }
       else { liveRow.row.classList.remove('ok'); liveRow.fail('offline'); }
     });
 
     // Write the server time to connectionTest/<uid>, then read it back.
+    stage = 'write';
     const testRef = ref(fb.db, `connectionTest/${uid}`);
     await set(testRef, serverTimestamp());
     const snap = await get(testRef);
@@ -61,8 +75,12 @@ export async function runConnectionCheck(app) {
     toast('Firebase is working 🎉');
   } catch (err) {
     console.error(err);
-    const failing = authRow.row.classList.contains('ok') ? writeRow : authRow;
+    const failing = stage === 'write' ? writeRow : stage === 'live' ? liveRow : authRow;
     failing.fail(friendlyError(err));
+    if (stage === 'auth') liveRow.fail('not tested');
+    else liveRow.row.classList.add('bad');
+  } finally {
+    stopLive?.(); // one-shot check; do not leave a Firebase listener behind
   }
 }
 

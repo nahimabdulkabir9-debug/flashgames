@@ -17,7 +17,7 @@ export default {
   create(container, session) {
     const gref = (sub = '') => ref(db, `rooms/${session.code}/game${sub}`);
     let g = null; let letters = []; let picked = []; let tiles = []; let panelKey = ''; let acting = false; let actKey = '';
-    const level = () => LEVELS[g.levels[g.round]];
+    const level = () => LEVELS[g?.levels?.[g?.round]] || LEVELS[0];
     const nameOf = (uid) => session.room.players[uid]?.name || 'Player';
     const avatarOf = (uid) => session.room.players[uid]?.avatar || '🙂';
 
@@ -36,7 +36,7 @@ export default {
     const timer = el('span', {});
     const endBtn = el('button', {
       class: 'btn secondary', type: 'button', hidden: true,
-      onclick: () => { if (confirm('End the game for everyone?')) session.endGame(); },
+      onclick: () => { if (confirm('End the game for everyone?')) session.endGame().catch(() => toast('Could not end the game. Try again.')); },
     }, 'End game');
     mount(container, head, slots, panel, board, endBtn);
 
@@ -80,10 +80,13 @@ export default {
     const act = (fn) => {
       if (acting) return;
       acting = true;
-      Promise.resolve().then(fn).catch((err) => {
-        console.warn('Host action failed', err);
-        acting = false;
-      });
+      Promise.resolve().then(fn).then(
+        () => { acting = false; },
+        (err) => {
+          console.warn('Host action failed', err);
+          acting = false;
+        },
+      );
     };
     function finishRound() {
       const scores = { ...(g.scores || {}) }; const gain = {};
@@ -114,6 +117,11 @@ export default {
           return;
         }
         if (actKey !== `${g.round}${g.phase}`) { actKey = `${g.round}${g.phase}`; acting = false; }
+        if (session.isHost && (!Array.isArray(g.levels) || !g.levels.length)) {
+          write(update(gref(), {
+            levels: shuffled(LEVELS.map((_, i) => i)).slice(0, ROUNDS),
+          }), 'Could not repair the level list');
+        }
         const key = `${g.round}|${g.phase}`;
         if (key !== panelKey) {
           panelKey = key;
@@ -125,7 +133,7 @@ export default {
           } else {
             const top = Object.entries(g.scores || {}).sort((a, b) => b[1] - a[1])[0];
             mount(panel, el('h2', { class: 'center' }, top ? `🏆 ${nameOf(top[0])} wins!` : 'Game over'),
-              session.isHost ? el('button', { class: 'btn', type: 'button', onclick: () => session.endGame() }, 'Back to lobby')
+              session.isHost ? el('button', { class: 'btn', type: 'button', onclick: () => session.endGame().catch(() => toast('Could not return to the lobby. Try again.')) }, 'Back to lobby')
                 : el('p', { class: 'muted center' }, 'Waiting for the host…'));
           }
         }

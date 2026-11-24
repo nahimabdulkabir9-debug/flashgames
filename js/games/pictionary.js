@@ -13,15 +13,12 @@ const WORDS = ('apple,banana,bicycle,castle,dragon,guitar,rocket,pizza,umbrella,
   + 'mountain,helicopter,cactus,octopus,teapot,skateboard,ladder,key,clock,whale,sunflower,tent,train,crown,ghost,giraffe,mushroom,telescope,fireworks,microscope,waterfall,astronaut,submarine,crocodile,trampoline,parachute,bulldozer,snowflake,campfire').split(',');
 const COLORS = ['#111111', '#e03131', '#1c7ed6', '#2f9e44', '#f08c00', '#9c36b5'];
 const DRAW_MS = 80000;
+const DRAWER_GRACE_MS = 8000; // a refresh or brief blip must not skip the round
 const OVER_MS = 6000;
 const ROUNDS_EACH = 3; // how many times each player gets to draw
 const isHard = (w) => w.length >= 7; // hard words reveal 2 letters, easy words reveal 1
 
 const norm = (s) => String(s).toLowerCase().replace(/[^a-z]/g, '');
-async function hash(word, salt) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${salt}:${norm(word)}`));
-  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
-}
 const shuffled = (list) => [...list].sort(() => Math.random() - 0.5);
 // The drawer gets two easy words and one hard word to choose from.
 const pick3 = () => shuffled([...shuffled(WORDS.filter((w) => !isHard(w))).slice(0, 2), shuffled(WORDS.filter(isHard))[0]]);
@@ -34,9 +31,10 @@ export default {
     const secretRef = (round) => ref(db, `gameSecrets/${session.code}/${round}`);
     let g = null; let myWord = null; let positions = []; let shown = 0; let hintEl = null; let choices = []; let choicesRound = '';
     let drawing = null; let color = COLORS[0]; let lastPush = 0; let panelKey = ''; let acting = false; let actKey = '';
-    let secret = null; let stopSecret = null; let secretKey = '';
+    let secret = null; let stopSecret = null; let secretKey = ''; let secretRound = -1;
     let stopGuesses = null; let guessKey = '';
     const claimed = new Set(); // guesses this drawer has already scored
+    const drawerAway = { uid: '', since: 0 };
 
     const head = el('section', { class: 'card center' });
     const canvas = el('canvas', { class: 'pic-canvas', width: 600, height: 600 });
@@ -46,7 +44,7 @@ export default {
     const board = el('section', { class: 'card' });
     const endBtn = el('button', {
       class: 'btn secondary', type: 'button', hidden: true,
-      onclick: () => { if (confirm('End the game for everyone?')) session.endGame(); },
+      onclick: () => { if (confirm('End the game for everyone?')) session.endGame().catch(() => toast('Could not end the game. Try again.')); },
     }, 'End game');
     mount(container, head, el('section', { class: 'card' }, canvas), panel, board, endBtn);
 
@@ -104,21 +102,26 @@ export default {
     const act = (fn) => {
       if (acting) return;
       acting = true;
-      Promise.resolve().then(fn).catch((err) => {
-        console.warn('Host action failed', err);
-        acting = false;
-      });
+      Promise.resolve().then(fn).then(
+        () => { acting = false; },
+        (err) => {
+          console.warn('Host action failed', err);
+          acting = false;
+        },
+      );
     };
     function clearRoundFields() {
       // The host clears these atomically when a round changes. `null` values
       // are allowed by the rules so stale data never leaks into a new round.
       return {
         pick: null, strokes: null, solved: null, guesses: null, repick: null,
-        hash: null, len: null, hint: null, word: null,
+        len: null, hint: null, word: null,
         endsAt: null, overAt: null, voteEndsAt: null, gain: null,
       };
     }
     function newRound(r) {
+      drawerAway.uid = '';
+      drawerAway.since = 0;
       const ids = order();
       if (!ids.length) return;
       if (r >= g.total) return update(gref(), { ...clearRoundFields(), phase: 'final' });
@@ -132,7 +135,7 @@ export default {
       return update(gref(), {
         ...clearRoundFields(),
         phase: 'draw',
-        hash: g.pick.hash, len: g.pick.len, hint: g.pick.hint,
+        len: g.pick.len, hint: g.pick.hint,
         endsAt: serverNow() + DRAW_MS,
       });
     }
@@ -160,9 +163,18 @@ export default {
       if (!g || !session.isHost) return;
       const now = serverNow(); const players = session.playerList();
       if (g.phase === 'pick') {
-        const drawerOnline = players.find((p) => p.uid === g.drawer)?.online !== false;
-        if (!drawerOnline) act(() => newRound(g.round + 1));
-        else if (g.pick) act(startDraw);
+        const drawer = players.find((p) => p.uid === g.drawer);
+        const drawerOnline = drawer && drawer.online !== false;
+        if (drawerOnline) {
+          drawerAway.uid = '';
+          drawerAway.since = 0;
+          if (g.pick) act(startDraw);
+        } else if (drawerAway.uid !== g.drawer || !drawerAway.since) {
+          drawerAway.uid = g.drawer;
+          drawerAway.since = now;
+        } else if (now - drawerAway.since >= DRAWER_GRACE_MS) {
+          act(() => newRound(g.round + 1));
+        }
       }
       if (g.phase === 'draw') {
         if (g.repick) act(backToPick);
@@ -178,10 +190,18 @@ export default {
     function watchSecret() {
       const mine = Boolean(g && (g.phase === 'pick' || g.phase === 'draw') && g.drawer === session.uid);
       const key = mine ? `${session.code}/${g.round}` : '';
-      if (key === secretKey) return;
+      const round = g?.round ?? -1;
+      if (key === secretKey && round === secretRound) return;
+      secretRound = round;
+      // Keep the drawer's word through `over` as a fallback in case the host
+      // cannot publish it. It is cleared when the next round starts.
+      const keepWord = Boolean(g && g.phase === 'over' && g.drawer === session.uid
+        && myWord && secretKey === `${session.code}/${g.round}`);
       if (stopSecret) { stopSecret(); stopSecret = null; }
       secretKey = key;
-      secret = null; myWord = null; positions = []; shown = 0; panelKey = '';
+      if (!keepWord) {
+        secret = null; myWord = null; positions = []; shown = 0; panelKey = '';
+      }
       if (!key) return;
       stopSecret = onValue(secretRef(g.round), (snap) => {
         const s = snap.val();
@@ -210,10 +230,14 @@ export default {
         Object.entries(guesses).forEach(([uid, text]) => {
           const id = `${g?.round}|${uid}`;
           if (uid === session.uid || !myWord || g.solved?.[uid] || claimed.has(id)) return;
+          if (!session.room?.players?.[uid]) return; // left or kicked: rules reject the mark
           if (norm(text) !== norm(myWord)) return;
           claimed.add(id);
           set(gref(`/solved/${uid}`), Math.max(1, (g.endsAt || serverNow()) - serverNow()))
-            .catch((err) => { claimed.delete(id); console.warn('Could not mark guess', err); });
+            .catch((err) => {
+              if (!isPermissionDenied(err)) claimed.delete(id);
+              console.warn('Could not mark guess', err);
+            });
         });
       }, (err) => console.warn('Guess listener error', err));
     }
@@ -238,9 +262,7 @@ export default {
         drawer: session.uid, round: g.round, word, positions: nextPositions.join(','),
       });
       myWord = word; positions = nextPositions; shown = 0;
-      await set(gref('/pick'), {
-        hash: await hash(word, `${session.code}${g.round}`), len: word.length, hint: maskHint(0),
-      });
+      await set(gref('/pick'), { len: word.length, hint: maskHint(0) });
     }
     async function choose(word) {
       try {
@@ -275,11 +297,17 @@ export default {
         } else kids.push(el('p', { class: 'muted center' }, `${nameOf(g.drawer)} is choosing a word…`));
       } else if (g.phase === 'draw') {
         if (g.drawer === session.uid) {
+          const swatches = COLORS.map((c) => el('button', {
+            class: 'swatch', type: 'button', style: `background:${c}`,
+            'aria-label': `Pen colour ${c}`, 'aria-pressed': String(c === color),
+            onclick: () => {
+              color = c;
+              swatches.forEach((b, i) => b.setAttribute('aria-pressed', String(COLORS[i] === c)));
+            },
+          }));
           kids.push(el('h2', {}, `Draw: ${myWord || '…'}`),
             myWord ? null : el('p', { class: 'muted center' }, 'Your word could not be restored. Use repick to choose another.'),
-            el('div', { class: 'swatches' }, COLORS.map((c) => el('button', {
-              class: 'swatch', type: 'button', style: `background:${c}`, 'aria-label': 'Pen colour', onclick: () => { color = c; },
-            }))),
+            el('div', { class: 'swatches', role: 'group', 'aria-label': 'Pen colours' }, swatches),
             el('button', { class: 'btn secondary', type: 'button', onclick: () => write(remove(gref('/strokes')), 'Clear failed') }, '🧹 Clear drawing'),
             el('button', {
               class: 'btn secondary', type: 'button',
@@ -295,13 +323,13 @@ export default {
             el('button', { class: 'btn', type: 'button', onclick: send }, 'Guess'));
         }
       } else if (g.phase === 'over') {
-        kids.push(el('h2', { class: 'center' }, `The word was “${g.word || secret?.word || '…'}”`),
+        kids.push(el('h2', { class: 'center' }, `The word was “${g.word || secret?.word || myWord || '…'}”`),
           ...Object.entries(g.gain || {}).map(([uid, pts]) => el('p', { class: 'center' }, `${nameOf(uid)} +${pts}`)),
           Object.keys(g.gain || {}).length ? null : el('p', { class: 'muted center' }, 'Nobody guessed it.'));
       } else {
         const top = Object.entries(g.scores || {}).sort((a, b) => b[1] - a[1])[0];
         kids.push(el('h2', { class: 'center' }, top ? `🏆 ${nameOf(top[0])} wins!` : 'Game over'),
-          session.isHost ? el('button', { class: 'btn', type: 'button', onclick: () => session.endGame() }, 'Back to lobby')
+          session.isHost ? el('button', { class: 'btn', type: 'button', onclick: () => session.endGame().catch(() => toast('Could not return to the lobby. Try again.')) }, 'Back to lobby')
             : el('p', { class: 'muted center' }, 'Waiting for the host…'));
       }
       mount(panel, kids);
@@ -328,7 +356,12 @@ export default {
           return;
         }
         const actionKey = `${g.round}|${g.phase}|${Boolean(g.repick)}`;
-        if (actKey !== actionKey) { actKey = actionKey; acting = false; claimed.clear(); }
+        if (actKey !== actionKey) {
+          actKey = actionKey;
+          acting = false;
+          claimed.clear();
+          drawing = null; // never carry a half-drawn stroke into the next round
+        }
         if (g.phase === 'over' && g.drawer === session.uid && myWord && !g.word) {
           write(update(gref(), { word: myWord }), 'Could not reveal the word');
         }

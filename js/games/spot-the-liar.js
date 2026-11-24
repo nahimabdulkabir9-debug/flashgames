@@ -1,6 +1,7 @@
 // spot-the-liar.js: one secret word, one hidden liar.
-// The host runs the phase clock; the word lives in liarSecrets so only
-// non-liars can read it until the reveal. The liar gets the category only.
+// The host runs the phase clock. The word lives in liarSecrets and the liar's
+// identity lives in liarAssignments, so nobody can read either before reveal
+// unless they are allowed to see that particular piece.
 import {
   db, ref, set, update, get, onValue, serverNow, isPermissionDenied,
 } from '../firebase.js';
@@ -15,6 +16,7 @@ import {
 } from './spot-the-liar-rules.js';
 
 const shuffled = (list) => [...list].sort(() => Math.random() - 0.5);
+const SETUP_MS = 30000; // stops an away host from freezing the room in setup
 const PHASE_LABELS = {
   setup: 'Choosing the word',
   clue: 'One-word clues',
@@ -36,14 +38,21 @@ export default {
   create(container, session) {
     const gref = (sub = '') => ref(db, `rooms/${session.code}/game${sub}`);
     const secretRef = (round) => ref(db, `liarSecrets/${session.code}/${round}`);
+    const assignmentRef = (round, uid) =>
+      ref(db, `liarAssignments/${session.code}/${round}${uid ? `/${uid}` : ''}`);
 
     let g = null;
     let secret = null;
     let stopSecret = null;
     let secretKey = '';
+    let stopAssignment = null;
+    let assignmentKey = '';
     let panelKey = '';
     let actKey = '';
     let acting = false;
+    let myLiar = false;
+    let hostLiar = '';
+    let pendingLiar = ''; // set locally until the assignment listener reports back
     let hostCategory = CATEGORY_NAMES[0];
     let hostWord = wordsFor(hostCategory)[0];
     let hostChoiceRound = -1;
@@ -56,7 +65,7 @@ export default {
     const timer = el('span', {});
     const endBtn = el('button', {
       class: 'btn secondary', type: 'button', hidden: true,
-      onclick: () => { if (confirm('End the game for everyone?')) session.endGame(); },
+      onclick: () => { if (confirm('End the game for everyone?')) session.endGame().catch(() => toast('Could not end the game. Try again.')); },
     }, 'End game');
     mount(container, head, panel, board, endBtn);
 
@@ -64,6 +73,17 @@ export default {
     const nameOf = (uid) => session.room?.players?.[uid]?.name || 'Player';
     const avatarOf = (uid) => session.room?.players?.[uid]?.avatar || '🙂';
     const isRevealed = (phase) => ['reveal', 'over', 'final'].includes(phase);
+
+    // The liar is hidden until reveal. Hosts can read the assignment subtree;
+    // everyone else only knows their own true/false status.
+    const liarOf = () => session.isHost
+      ? (pendingLiar || hostLiar || (isRevealed(g?.phase) ? g?.liar || '' : ''))
+      : (isRevealed(g?.phase) ? g?.liar || '' : '');
+    const amILiar = () => Boolean(
+      myLiar
+      || (session.isHost && pendingLiar === session.uid)
+      || (isRevealed(g?.phase) && g?.liar === session.uid),
+    );
 
     function noteError(label, err) {
       console.warn(label, err);
@@ -73,15 +93,18 @@ export default {
       Promise.resolve(promise).catch((err) => noteError(label, err));
       return promise;
     }
-    // Host actions are driven by a 250 ms clock. This guard stops two ticks
-    // from writing the same phase change twice.
+    // Host actions are driven by a 250 ms clock. Reset on success too, so a
+    // second turn in the same phase (another clue, another guess) is not lost.
     function act(fn) {
       if (acting) return;
       acting = true;
-      Promise.resolve().then(fn).catch((err) => {
-        console.warn('Host action failed', err);
-        acting = false;
-      });
+      Promise.resolve().then(fn).then(
+        () => { acting = false; },
+        (err) => {
+          console.warn('Host action failed', err);
+          acting = false;
+        },
+      );
     }
 
     function ensureHostChoice() {
@@ -92,39 +115,59 @@ export default {
       hostChoiceRound = g.round;
     }
 
-    // ----- Host referee -----
-    function initGame() {
-      const ids = players().map((p) => p.uid);
-      if (ids.length < 3) return Promise.resolve();
-      const total = Math.min(ids.length, MAX_ROUNDS);
-      const liarOrder = {};
+    function activeIds() {
+      const online = players().filter((p) => p.online !== false);
+      return (online.length >= 3 ? online : players()).map((p) => p.uid);
+    }
+    function makeOrders(ids) {
       const clueOrder = {};
-      shuffled(ids).slice(0, total).forEach((uid, i) => { liarOrder[i] = uid; });
       ids.forEach((uid, i) => { clueOrder[i] = uid; });
-      return set(gref(), {
-        round: 0, total, phase: 'setup', liar: liarOrder[0], liarOrder, clueOrder, scores: {},
+      return {
+        total: Math.min(ids.length, MAX_ROUNDS),
+        liar: shuffled(ids)[0],
+        clueOrder,
+      };
+    }
+
+    // ----- Host referee -----
+    async function initGame() {
+      const ids = activeIds();
+      if (ids.length < 3) return;
+      const { total, liar, clueOrder } = makeOrders(ids);
+      pendingLiar = liar;
+      await set(assignmentRef(0), { [liar]: true });
+      await set(gref(), {
+        round: 0, total, phase: 'setup', liar: null, clueOrder, scores: {},
+        setupEndsAt: serverNow() + SETUP_MS,
       });
     }
 
     function clearRoundFields() {
       // `null` is allowed by the rules, so no clue or vote can leak into the
-      // next round. Keep scores and the round/liar orders.
+      // next round. Keep scores and the clue order.
       return {
         liar: null, category: null, caught: null, guessCorrect: null,
         clues: null, liarVotes: null, liarGuess: null,
         clueIndex: null, currentCluer: null,
         endsAt: null, guessEndsAt: null, overAt: null, gain: null,
+        setupEndsAt: null,
       };
     }
 
-    function newRound(r) {
-      const ids = players().map((p) => p.uid);
-      if (!ids.length) return Promise.resolve();
-      if (r >= g.total) return update(gref(), { ...clearRoundFields(), phase: 'final' });
-      const planned = g.liarOrder?.[String(r)];
-      const liar = ids.includes(planned) ? planned : shuffled(ids)[0];
+    async function newRound(r) {
+      const ids = activeIds();
+      if (ids.length < 3) return Promise.resolve();
+      if (r >= (g.total || MAX_ROUNDS)) {
+        return update(gref(), { ...clearRoundFields(), phase: 'final' });
+      }
+      // Rebuild both orders from the players still in the room. Otherwise an
+      // exit leaves stale clue givers and a liar who is no longer present.
+      const { total, liar, clueOrder } = makeOrders(ids);
+      pendingLiar = liar;
+      await set(assignmentRef(r), { [liar]: true });
       return update(gref(), {
-        ...clearRoundFields(), round: r, liar, phase: 'setup', scores: g.scores || {},
+        ...clearRoundFields(), round: r, total, liar: null, phase: 'setup',
+        clueOrder, scores: g.scores || {}, setupEndsAt: serverNow() + SETUP_MS,
       });
     }
 
@@ -134,13 +177,13 @@ export default {
       hostCategory = chosenCategory;
       hostWord = chosenWord;
       hostChoiceRound = g.round;
-      // The host phone writes the word where only non-liars can read it.
+      // No liar uid here: everyone can read this word, but only non-liars may
+      // subscribe before the guess window ends.
       await set(secretRef(g.round), {
-        round: g.round, liar: g.liar, category: chosenCategory, word: chosenWord,
+        round: g.round, category: chosenCategory, word: chosenWord,
       });
       await update(gref(), {
         ...clearRoundFields(),
-        liar: g.liar,
         phase: 'clue',
         category: chosenCategory,
         clueIndex: 0,
@@ -172,9 +215,10 @@ export default {
     }
 
     function revealLiar() {
-      const { caught } = tallyVotes(g.liarVotes || {}, g.liar);
+      const liar = liarOf();
+      const { caught } = tallyVotes(g.liarVotes || {}, liar);
       return update(gref(), {
-        phase: 'reveal', caught, liarGuess: null, guessCorrect: null,
+        phase: 'reveal', liar, caught, liarGuess: null, guessCorrect: null,
         endsAt: null, guessEndsAt: serverNow() + (caught ? GUESS_MS : REVEAL_MS),
         overAt: null, gain: null,
       });
@@ -188,8 +232,9 @@ export default {
       } catch (err) {
         console.warn('Could not read the revealed word', err);
       }
+      const liar = g.liar || liarOf();
       const result = scoreRound({
-        liar: g.liar, votes: g.liarVotes || {}, word,
+        liar, votes: g.liarVotes || {}, word,
         guess: g.liarGuess || '', caught: g.caught === true,
       });
       return update(gref(), {
@@ -204,6 +249,14 @@ export default {
     function tick() {
       if (!g || !session.isHost) return;
       const now = serverNow();
+      if (g.phase === 'setup') {
+        if (typeof g.setupEndsAt !== 'number') {
+          act(() => update(gref(), { setupEndsAt: now + SETUP_MS }));
+        } else if (now >= g.setupEndsAt) {
+          ensureHostChoice();
+          act(() => startRound(hostCategory, hostWord));
+        }
+      }
       if (g.phase === 'clue') {
         const current = g.currentCluer;
         const online = players().find((p) => p.uid === current)?.online !== false;
@@ -211,8 +264,10 @@ export default {
       }
       if (g.phase === 'discuss' && now >= g.endsAt) act(startVote);
       if (g.phase === 'vote') {
-        const online = players().filter((p) => p.online !== false);
-        if (now >= g.endsAt || (online.length && online.every((p) => g.liarVotes?.[p.uid]))) act(revealLiar);
+        // The liar is not expected to vote themselves out. An offline liar
+        // must not hold the round until the full timer expires.
+        const voters = players().filter((p) => p.online !== false && p.uid !== liarOf());
+        if (now >= g.endsAt || (voters.length && voters.every((p) => g.liarVotes?.[p.uid]))) act(revealLiar);
       }
       if (g.phase === 'reveal') {
         if (now >= g.guessEndsAt || (g.caught && g.liarGuess)) act(finishReveal);
@@ -227,13 +282,37 @@ export default {
       tick();
     }, 250);
 
+    // ----- Hidden liar assignment -----
+    function watchAssignment() {
+      const key = g ? `${session.code}/${g.round}` : '';
+      if (key === assignmentKey) return;
+      if (stopAssignment) { stopAssignment(); stopAssignment = null; }
+      assignmentKey = key;
+      myLiar = false;
+      hostLiar = '';
+      panelKey = '';
+      if (!key) return;
+      stopAssignment = onValue(
+        session.isHost ? assignmentRef(g.round) : assignmentRef(g.round, session.uid),
+        (snap) => {
+          if (session.isHost) {
+            const values = snap.val() || {};
+            hostLiar = Object.keys(values).find((uid) => values[uid] === true) || '';
+            myLiar = hostLiar === session.uid;
+          } else {
+            myLiar = snap.val() === true;
+          }
+          panelKey = '';
+          renderPanel();
+        },
+        (err) => console.warn('Liar assignment listener error', err),
+      );
+    }
+
     // ----- Secret word -----
-    // Liars cannot subscribe while the round is live; everyone can once the
-    // host opens the reveal. The host's phone does not need to read it either
-    // while the host is the liar.
     function watchSecret() {
       const live = Boolean(g && g.phase);
-      const allowed = live && (g.liar !== session.uid || isRevealed(g.phase));
+      const allowed = live && (!amILiar() || isRevealed(g.phase));
       const key = allowed ? `${session.code}/${g.round}` : '';
       if (key === secretKey) return;
       if (stopSecret) { stopSecret(); stopSecret = null; }
@@ -243,10 +322,8 @@ export default {
       if (!key) return;
       stopSecret = onValue(secretRef(g.round), (snap) => {
         const s = snap.val();
-        const valid = s && s.round === g?.round
-          && (s.liar !== session.uid || isRevealed(g?.phase));
-        secret = valid ? s : null;
-        if (session.isHost && g?.phase === 'setup' && g.liar !== session.uid && secret) {
+        secret = s && s.round === g?.round ? s : null;
+        if (session.isHost && g?.phase === 'setup' && !amILiar() && secret) {
           hostCategory = secret.category || hostCategory;
           hostWord = secret.word || hostWord;
           hostChoiceRound = g.round;
@@ -258,9 +335,8 @@ export default {
 
     // ----- Screens -----
     function infoLine() {
-      const isLiar = g.liar === session.uid;
       const category = g.category || secret?.category || '…';
-      if (isLiar && !isRevealed(g.phase)) {
+      if (amILiar() && !isRevealed(g.phase)) {
         return el('p', { class: 'secret-word liar-only' },
           `Category: ${category} · You are the liar 🕵️`,
           el('span', { class: 'muted' }, ' Give a clue that fits the category without giving away a word.'));
@@ -289,7 +365,7 @@ export default {
       ensureHostChoice();
       // If the host is the liar, pick a word silently. They already know the
       // category (every liar does) but must not see the word on their screen.
-      const hostIsLiar = g.liar === session.uid;
+      const hostIsLiar = amILiar();
       const catOptions = CATEGORY_NAMES.map((name) => {
         const option = el('option', { value: name }, name);
         if (name === hostCategory) option.selected = true;
@@ -356,11 +432,18 @@ export default {
           class: 'input', type: 'text', maxlength: 20, autocomplete: 'off',
           placeholder: 'One word only', 'aria-label': 'Your one-word clue', enterkeyhint: 'send',
         });
+        let sending = false;
         const send = () => {
+          if (sending) return;
           const clue = clueInput.value.trim();
           if (!clue || /\s/.test(clue)) return toast('Give one word only.');
+          sending = true;
           clueInput.disabled = true;
-          write(set(gref(`/clues/${session.uid}`), clue.slice(0, 20)), 'Could not send the clue');
+          write(set(gref(`/clues/${session.uid}`), clue.slice(0, 20)).catch((err) => {
+            sending = false;
+            if (clueInput) clueInput.disabled = false;
+            throw err;
+          }), 'Could not send the clue');
         };
         clueInput.addEventListener('keydown', (event) => {
           if (event.key === 'Enter') send();
@@ -399,21 +482,30 @@ export default {
     }
 
     function buildReveal() {
+      const hiding = amILiar() && g.caught && !g.liarGuess && g.phase === 'reveal';
       const kids = [
-        el('h2', { class: 'center' }, `The liar was ${nameOf(g.liar)}`),
-        el('p', { class: 'reveal-word' }, 'The word was ', el('strong', {}, secret?.word || '…')),
+        el('h2', { class: 'center' }, `The liar was ${nameOf(g.liar || liarOf())}`),
+        el('p', { class: 'reveal-word' }, 'The word was ',
+          el('strong', {}, hiding ? 'hidden until you guess' : secret?.word || '…')),
       ];
       if (g.caught) {
-        if (g.liar === session.uid && !g.liarGuess) {
+        if (amILiar() && !g.liarGuess) {
           guessInput = el('input', {
             class: 'input', type: 'text', maxlength: 30, autocomplete: 'off',
             placeholder: 'Guess the word', 'aria-label': 'Guess the secret word', enterkeyhint: 'send',
           });
+          let sending = false;
           const send = () => {
+            if (sending) return;
             const guess = guessInput.value.trim();
             if (!guess) return;
+            sending = true;
             guessInput.disabled = true;
-            write(set(gref('/liarGuess'), guess.slice(0, 30)), 'Could not send your guess');
+            write(set(gref('/liarGuess'), guess.slice(0, 30)).catch((err) => {
+              sending = false;
+              if (guessInput) guessInput.disabled = false;
+              throw err;
+            }), 'Could not send your guess');
           };
           guessInput.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') send();
@@ -422,8 +514,8 @@ export default {
             el('button', { class: 'btn', type: 'button', onclick: send }, 'Send guess'));
         } else {
           kids.push(el('p', { class: 'muted center' }, g.liarGuess
-            ? `${nameOf(g.liar)} guessed “${g.liarGuess}”.`
-            : `${nameOf(g.liar)} has 15 seconds to guess the word…`));
+            ? `${nameOf(g.liar || liarOf())} guessed “${g.liarGuess}”.`
+            : `${nameOf(g.liar || liarOf())} has 15 seconds to guess the word…`));
         }
       } else {
         kids.push(el('p', { class: 'muted center' }, 'The liar got away with +200 points.'));
@@ -434,7 +526,7 @@ export default {
     function buildOver() {
       const kids = [
         el('h2', { class: 'center' }, 'Round over'),
-        el('p', { class: 'muted center' }, `The liar was ${nameOf(g.liar)} · Word: ${secret?.word || '…'}`),
+        el('p', { class: 'muted center' }, `The liar was ${nameOf(g.liar || liarOf())} · Word: ${secret?.word || '…'}`),
         ...Object.entries(g.gain || {}).map(([uid, pts]) =>
           el('p', { class: 'center' }, `${nameOf(uid)} +${pts}`)),
         el('p', { class: 'muted center' }, 'Next round starting…'),
@@ -447,7 +539,7 @@ export default {
       mount(panel, el('h2', { class: 'center' }, top ? `🏆 ${nameOf(top[0])} wins!` : 'Game over'),
         el('p', { class: 'muted center' }, 'Thanks for playing Spot the Liar.'),
         session.isHost
-          ? el('button', { class: 'btn', type: 'button', onclick: () => session.endGame() }, 'Back to lobby')
+          ? el('button', { class: 'btn', type: 'button', onclick: () => session.endGame().catch(() => toast('Could not return to the lobby. Try again.')) }, 'Back to lobby')
           : el('p', { class: 'muted center' }, 'Waiting for the host…'));
     }
 
@@ -479,6 +571,7 @@ export default {
     return {
       update(room) {
         g = room.game || null;
+        watchAssignment();
         watchSecret();
         if (!g) {
           if (session.isHost) write(initGame(), 'Could not start Spot the Liar');
@@ -489,10 +582,10 @@ export default {
         ensureHostChoice();
 
         const key = [
-          g.round, g.total, g.phase, g.liar, g.category, g.clueIndex, g.currentCluer,
-          Object.keys(g.clues || {}).length, Object.keys(g.liarVotes || {}).length,
-          g.liarVotes?.[session.uid]?.pick || '', g.caught, Boolean(g.liarGuess),
-          g.guessCorrect, Boolean(secret?.word), Boolean(g.gain),
+          g.round, g.total, g.phase, g.liar, hostLiar, myLiar, g.category, g.clueIndex,
+          g.currentCluer, Object.keys(g.clues || {}).length,
+          Object.keys(g.liarVotes || {}).length, g.liarVotes?.[session.uid]?.pick || '',
+          g.caught, Boolean(g.liarGuess), g.guessCorrect, Boolean(secret?.word), Boolean(g.gain),
         ].join('|');
         if (key !== panelKey) { panelKey = key; renderPanel(); }
 
@@ -504,6 +597,7 @@ export default {
       destroy() {
         clearInterval(clock);
         if (stopSecret) stopSecret();
+        if (stopAssignment) stopAssignment();
       },
     };
   },

@@ -50,10 +50,15 @@ export function toast(message, ms = 2500) {
  */
 export function showModal({ title, body = [], actions = [{ label: 'OK' }] }) {
   const previousFocus = document.activeElement;
+  // Keep the page behind the dialog keyboard- and pointer-inert.
+  const background = [...document.querySelectorAll('.topbar, #app')]
+    .filter((node) => !node.hasAttribute('inert'));
   const close = () => {
     document.removeEventListener('keydown', onKeydown, true);
     overlay.remove();
-    if (previousFocus instanceof HTMLElement) previousFocus.focus();
+    background.forEach((node) => node.removeAttribute('inert'));
+    if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
+    else document.querySelector('#app button, #app a')?.focus?.();
   };
   const buttons = actions.map(({ label, onClick, style = '' }) =>
     el('button', {
@@ -85,7 +90,10 @@ export function showModal({ title, body = [], actions = [{ label: 'OK' }] }) {
     const items = focusable();
     if (!items.length) { event.preventDefault(); dialog.focus(); return; }
     const first = items[0]; const last = items[items.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
+    if (!dialog.contains(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
       event.preventDefault(); last.focus();
     } else if (!event.shiftKey && document.activeElement === last) {
       event.preventDefault(); first.focus();
@@ -93,6 +101,7 @@ export function showModal({ title, body = [], actions = [{ label: 'OK' }] }) {
   }
 
   document.body.append(overlay);
+  background.forEach((node) => node.setAttribute('inert', ''));
   document.addEventListener('keydown', onKeydown, true);
   buttons[0]?.focus();
   return close;
