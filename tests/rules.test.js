@@ -60,7 +60,8 @@ test('a player can create a public room', async () => {
     name: 'Host User', avatar: '🙂', joinedAt: serverTimestamp(), slot: '1', ready: false, online: true,
   }));
   await assertSucceeds(set(ref(db, `publicRooms/${code}`), {
-    hostName: 'Host User', avatar: '🙂', players: 1, updatedAt: serverTimestamp(),
+    hostName: 'Host User', avatar: '🙂', players: 1,
+    gameId: 'pictionary', updatedAt: serverTimestamp(),
   }));
 });
 
@@ -83,6 +84,25 @@ test('visitors can record one daily visit under their own uid', async () => {
   await assertFails(set(ref(hostDb, `siteVisits/2026-11-24/${GUEST}`), serverTimestamp()));
   await assertFails(set(ref(hostDb, `siteVisits/1124/${HOST}`), serverTimestamp()));
   await assertFails(get(ref(hostDb, `siteVisits/2026-11-24`)));
+});
+
+test('visitors own their online tab and daily play records', async () => {
+  const db = dbAs(HOST);
+  await assertSucceeds(set(ref(db, `onlineUsers/${HOST}/tabs/tab-1`), { connectedAt: serverTimestamp() }));
+  await assertSucceeds(remove(ref(db, `onlineUsers/${HOST}/tabs/tab-1`)));
+  await assertFails(set(ref(db, `onlineUsers/${GUEST}/tabs/tab-2`), { connectedAt: serverTimestamp() }));
+  await assertSucceeds(get(ref(db, 'onlineUsers')));
+
+  await assertSucceeds(set(ref(db, `dailyPlayers/2026-11-24/${HOST}`), {
+    lastGame: 'pictionary', at: serverTimestamp(),
+  }));
+  await assertFails(set(ref(db, `dailyPlayers/2026-11-24/${GUEST}`), {
+    lastGame: 'pictionary', at: serverTimestamp(),
+  }));
+  await assertFails(set(ref(db, `dailyPlayers/1124/${HOST}`), {
+    lastGame: 'pictionary', at: serverTimestamp(),
+  }));
+  await assertSucceeds(get(ref(db, 'dailyPlayers/2026-11-24')));
 });
 
 test('only room members can read a room', async () => {

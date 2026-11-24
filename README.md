@@ -18,13 +18,14 @@ See [PROGRESS.md](PROGRESS.md) for what is built so far and what comes next.
 | `css/style.css` | All styling: colours, light/dark mode, big touch-friendly buttons. |
 | `js/config.js` | App name and your Firebase web config. |
 | `js/firebase.js` | Connects to Firebase, signs in anonymously, records daily visitors, server time helper. |
+| `js/stats.js` | Live online count, players-today count, and per-tab presence cleanup. |
 | `js/ui.js` | Safe helpers for building the page (`el`, `mount`, `toast`). |
 | `js/app.js` | Starts the app and picks the screen: home, lobby, or setup check. Rejoins your room after a refresh. |
 | `js/check.js` | The setup check screen. Open the site with `?check=1` to run it. |
 | `js/storage.js` | Remembers your nickname, avatar, theme and last room on this phone. |
 | `js/filter.js` | Cleans typed text and blocks rude nicknames. |
 | `js/room.js` | Creates and joins rooms, online/offline presence, kick, leave, automatic host promotion. |
-| `js/home.js` | Home screen: nickname, avatar picker, create or join. |
+| `js/home.js` | Home screen: live counters, game catalog, nickname, avatar picker, create or join. |
 | `js/lobby.js` | Lobby: room code, share buttons, live player list, ready, host controls. |
 | `icons/` | App icon, drawn in SVG. |
 | `firebase/database.rules.json` | Security rules you publish to Firebase. |
@@ -49,17 +50,24 @@ See [PROGRESS.md](PROGRESS.md) for what is built so far and what comes next.
 
 To check everything is connected, open the site with `?check=1` at the end of the address (for example <http://localhost:8000/?check=1>).
 
-## Daily visitor counts
+## Site counters
 
-The app records a visit each time a browser loads the site. Because the key is `siteVisits/<YYYY-MM-DD>/<uid>`, each visitor is counted once per UTC day. To read it:
+The homepage shows two live numbers:
+
+- **Online now** — unique anonymous uids with at least one open tab. Each tab writes `onlineUsers/<uid>/tabs/<tabId>`; Firebase removes it when the tab disconnects.
+- **Played today** — unique players who had a game start on that UTC day, stored at `dailyPlayers/<YYYY-MM-DD>/<uid>`.
+
+There is also a separate daily visitor counter at `siteVisits/<YYYY-MM-DD>/<uid>`. Each key is one anonymous browser per UTC day.
+
+To inspect the raw data:
 
 1. Firebase Console → Realtime Database → Data.
-2. Expand `siteVisits`, then the date you want.
-3. Count the keys under that date. Each key is one anonymous visitor for that day.
+2. Expand `onlineUsers`, `dailyPlayers`, or `siteVisits`.
+3. Count the uids under the node/date you want.
 
-Only a visitor's own uid can be written, and visitors cannot read this data from the app. It stores no nickname or game data. A different device, private window, or cleared site data gets a new anonymous uid and counts as a new visitor.
+Only a visitor's own uid can be written. No nickname, room code, or game answer is stored in these counters. A different device, private window, or cleared site data gets a new anonymous uid and counts as a new visitor.
 
-Counts start from the day this version goes live; earlier visits are not available. This change updates `firebase/database.rules.json`, so publish the rules too.
+Counts start from the day this version goes live; earlier activity is not available. This updates `firebase/database.rules.json`, so publish the rules too.
 
 ### Is it safe to put the Firebase config in a public repo?
 

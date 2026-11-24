@@ -312,6 +312,41 @@
         }
       }
     },
+    "onlineUsers": {
+      ".read": "auth != null",
+      "$uid": {
+        "tabs": {
+          "$tabId": {
+            ".write": "auth != null && auth.uid === $uid",
+            ".validate": "$tabId.matches(/^[A-Za-z0-9_-]{1,80}$/) && newData.hasChildren(['connectedAt'])",
+            "connectedAt": {
+              ".validate": "newData.val() === now"
+            },
+            "$other": {
+              ".validate": false
+            }
+          }
+        }
+      }
+    },
+    "dailyPlayers": {
+      ".read": "auth != null",
+      "$day": {
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid",
+          ".validate": "$day.matches(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/) && newData.hasChildren(['lastGame', 'at'])",
+          "lastGame": {
+            ".validate": "newData.isString() && newData.val().length <= 40"
+          },
+          "at": {
+            ".validate": "newData.val() === now"
+          },
+          "$other": {
+            ".validate": false
+          }
+        }
+      }
+    },
     "siteVisits": {
       "$day": {
         "$uid": {
@@ -333,6 +368,9 @@
         },
         "players": {
           ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 16"
+        },
+        "gameId": {
+          ".validate": "!newData.exists() || (newData.isString() && newData.val().length <= 40)"
         },
         "updatedAt": {
           ".validate": "newData.val() === now"

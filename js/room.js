@@ -64,7 +64,7 @@ export function roomLink(code) {
 }
 
 /** Create a room and return its code. */
-export async function createRoom(profile, { isPublic = false } = {}) {
+export async function createRoom(profile, { isPublic = false, gameId = '' } = {}) {
   const uid = await signIn();
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = randomCode();
@@ -81,6 +81,7 @@ export async function createRoom(profile, { isPublic = false } = {}) {
           createdAt: serverTimestamp(),
           status: 'lobby',
           public: Boolean(isPublic),
+          ...(gameId ? { gameId } : {}),
         },
         [`rooms/${code}/slots/1`]: uid,
       });
@@ -313,11 +314,17 @@ export class RoomSession {
     }
     const me = players[this.uid];
     if (!me) return; // removed while a public-listing update was in flight
-    const key = `${Object.keys(players).length}|${me.name}|${me.avatar}`;
+    const key = `${meta.gameId || ''}|${Object.keys(players).length}|${me.name}|${me.avatar}`;
     if (key === this.listedKey) return;
     this.listedKey = key;
     try {
-      await set(entry, { hostName: me.name, avatar: me.avatar, players: Object.keys(players).length, updatedAt: serverTimestamp() });
+      await set(entry, {
+        hostName: me.name,
+        avatar: me.avatar,
+        players: Object.keys(players).length,
+        ...(meta.gameId ? { gameId: meta.gameId } : {}),
+        updatedAt: serverTimestamp(),
+      });
       await onDisconnect(entry).remove();
     } catch { this.listedKey = null; }
   }
@@ -438,8 +445,11 @@ export function watchPublicRooms(callback) {
 }
 
 /** Join a random open public room, or start a new public one if none is open. */
-export async function quickPlay(profile) {
+export async function quickPlay(profile, gameId = '') {
   await signIn();
+  // A game chosen from the homepage gets its own public room so everyone
+  // who joins is playing the same game. app.js starts it when enough arrive.
+  if (gameId) return createRoom(profile, { isPublic: true, gameId });
   const open = freshRooms((await get(ref(db, 'publicRooms'))).val());
   while (open.length) {
     const [pick] = open.splice(Math.floor(Math.random() * open.length), 1);

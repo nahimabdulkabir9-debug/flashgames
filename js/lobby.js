@@ -24,6 +24,7 @@ export function renderLobby(container, session, { onLeave }) {
   const hostUid = session.room.meta.hostUid;
   const link = roomLink(session.code);
   const isPublic = session.room.meta.public === true;
+  const chosen = GAMES.find((game) => game.id === session.room.meta.gameId);
 
   // ---- Room code + sharing ----
   const shareText = `Join my ${APP_NAME} room! Code: ${session.code}\n${link}`;
@@ -85,9 +86,13 @@ export function renderLobby(container, session, { onLeave }) {
   if (session.isHost) {
     const waitingFor = players.filter((p) => p.uid !== hostUid && !p.ready && p.online !== false);
     controls.append(
-      el('p', { class: 'muted center' }, waitingFor.length
-        ? `Waiting for ${waitingFor.length} player(s) to get ready…`
-        : 'Everyone is ready!'),
+      chosen
+        ? el('p', { class: 'muted center' }, players.length >= chosen.minPlayers
+          ? `Starting ${chosen.emoji} ${chosen.name} now…`
+          : `Waiting for ${chosen.minPlayers - players.length} more player(s) to play ${chosen.name}…`)
+        : el('p', { class: 'muted center' }, waitingFor.length
+          ? `Waiting for ${waitingFor.length} player(s) to get ready…`
+          : 'Everyone is ready!'),
       el('button', {
         class: 'btn', type: 'button',
         onclick: () => chooseGame(session, players.length),

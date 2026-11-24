@@ -40,8 +40,11 @@ function setRoomInUrl(code) {
 let homeModule;   // home.js, loaded in start()
 let lobbyModule;  // lobby.js, loaded in start()
 let gamesModule;  // games/registry.js
+let statsModule;  // stats.js
 let running = null; // the game on screen: { id, game }
 let stopPublic = null; // stops the public-room list when we leave the home screen
+let stopStats = null; // stops the live online/played-today counters
+const playedTodayKeys = new Set(); // avoid rewriting the same day/game over and over
 
 // Anonymous sign-in can fail because the network is briefly down. A failed
 // promise must not poison every later call, so try a few times with backoff.
@@ -56,6 +59,18 @@ async function signInWithRetry(signIn, tries = 3) {
   throw lastError;
 }
 
+// One row per player per UTC day, written by each player when a game starts.
+function notePlayed(uid, gameId) {
+  if (!statsModule || !gameId) return;
+  const key = `${statsModule.utcDay()}|${gameId}`;
+  if (playedTodayKeys.has(key)) return;
+  playedTodayKeys.add(key);
+  statsModule.recordPlay(uid, gameId).catch((err) => {
+    playedTodayKeys.delete(key);
+    console.warn('Could not record today’s game', err);
+  });
+}
+
 async function start() {
   if (params.has('check') || !isFirebaseConfigured()) {
     const { runConnectionCheck } = await import('./check.js');
@@ -64,7 +79,10 @@ async function start() {
 
   // Load the Firebase-dependent modules only after the config check.
   // They are small, so we load them all at once, in parallel.
-  const [{ signIn, onConnectionChange, recordVisit }, room] = await Promise.all([import('./firebase.js'), import('./room.js')]);
+  const [{ signIn, onConnectionChange, recordVisit }, room, stats] = await Promise.all([
+    import('./firebase.js'), import('./room.js'), import('./stats.js'),
+  ]);
+  statsModule = stats;
   [homeModule, lobbyModule, gamesModule] = await Promise.all([import('./home.js'), import('./lobby.js'), import('./games/registry.js')]);
 
   // A persistent, quiet banner is better than a toast that disappears while
@@ -90,6 +108,7 @@ async function start() {
   // Privacy-light daily count: one entry per anonymous uid per UTC day.
   // Never let analytics stop someone from playing.
   recordVisit(uid).catch((err) => console.warn('Could not record the daily visit', err));
+  statsModule.startPresence(uid).catch((err) => console.warn('Could not publish online status', err));
 
   // Which room should we be in? A ?room= link wins; otherwise the room
   // saved from last time (for when the address was lost).
@@ -114,13 +133,20 @@ async function start() {
 }
 
 function showHome(invitedCode, uid, room) {
+  app.classList.add('home-page');
   setRoomInUrl(invitedCode || null);
   const { renderHome } = homeModule;
   renderHome(app, {
     invitedCode,
-    onCreate: async (profile, options) => enterRoom(await room.createRoom(profile, options), uid, room),
-    onQuick: async (profile) => enterRoom(await room.quickPlay(profile), uid, room),
+    onCreate: async (profile, options) =>
+      enterRoom(await room.createRoom(profile, options), uid, room, options?.gameId || ''),
+    onQuick: async (profile, gameId) =>
+      enterRoom(await room.quickPlay(profile, gameId), uid, room, gameId || ''),
     watchPublic: (callback) => { stopPublic?.(); stopPublic = room.watchPublicRooms(callback); },
+    watchStats: (callback) => {
+      stopStats?.();
+      stopStats = statsModule?.watchSiteStats(callback) || null;
+    },
     onJoin: async (code, profile) => enterRoom(await room.joinRoom(code, profile), uid, room),
   });
 }
@@ -147,6 +173,7 @@ function showRoom(session, r, onLeave) {
     stopGame();
     return lobbyModule.renderLobby(app, session, { onLeave });
   }
+  if (r.meta.status === 'playing') notePlayed(session.uid, def.id);
   if (!running || running.id !== def.id) {
     stopGame();
     const box = el('div');
@@ -169,15 +196,25 @@ function showRoom(session, r, onLeave) {
   }
 }
 
-function enterRoom(code, uid, room) {
+function enterRoom(code, uid, room, selectedGameId = '') {
+  app.classList.remove('home-page');
   stopPublic?.();
   stopPublic = null;
+  stopStats?.();
+  stopStats = null;
   save('lastRoom', code);
   setRoomInUrl(code);
   mount(app, el('p', { class: 'muted center' }, `Joining room ${code}…`));
 
+  // A game picked on the homepage is stored in the room meta, so it survives
+  // a refresh. The host starts it as soon as enough players have joined.
+  let autoStarted = false;
+
   const session = new room.RoomSession(code, uid, {
-    onUpdate: (r) => showRoom(session, r, () => leave()),
+    onUpdate: (r) => {
+      maybeAutoStart(r);
+      showRoom(session, r, () => leave());
+    },
     onRemoved: (reason) => {
       stopGame();
       save('lastRoom', null);
@@ -185,6 +222,19 @@ function enterRoom(code, uid, room) {
       showModal({ title: 'Back to home', body: [el('p', {}, reason)] });
     },
   });
+
+  function maybeAutoStart(r) {
+    if (autoStarted || !session.isHost || r.meta.status !== 'lobby') return;
+    const gameId = r.meta.gameId || selectedGameId;
+    const game = gameId ? gamesModule.getGame(gameId) : null;
+    if (!game) return;
+    if (Object.keys(r.players || {}).length < game.minPlayers) return;
+    autoStarted = true;
+    session.startGame(game.id).catch((err) => {
+      console.warn('Could not start the selected game', err);
+      autoStarted = false;
+    });
+  }
 
   async function leave() {
     stopGame();
