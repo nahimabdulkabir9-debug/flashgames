@@ -31,6 +31,12 @@ const HOST_GRACE_MS = 6000;
 /** Friendly error the screens can show directly. */
 export class RoomError extends Error {}
 
+/** A permission denial usually means the live rules are older than the app. */
+function rulesFailure(message, err) {
+  console.error(message, err);
+  return new RoomError(`${message}. Make sure the latest Firebase rules are published, then refresh.`);
+}
+
 export function normalizeCode(raw) {
   return String(raw || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5);
 }
@@ -79,10 +85,11 @@ export async function createRoom(profile, { isPublic = false } = {}) {
         [`rooms/${code}/slots/1`]: uid,
       });
     } catch (err) {
-      // Someone else grabbed the same code between our read and write.
-      // The rules refuse the overwrite, so try another code.
       if (!isPermissionDenied(err)) throw err;
-      continue;
+      // A collision means someone else won this code; try another one.
+      const taken = await get(ref(db, `rooms/${code}/meta`)).catch(() => null);
+      if (taken?.exists() && taken.val().hostUid !== uid) continue;
+      throw rulesFailure('Firebase rejected the room creation', err);
     }
 
     try {
@@ -92,6 +99,7 @@ export async function createRoom(profile, { isPublic = false } = {}) {
       // Don't leave a room shell behind if the player write failed.
       await remove(ref(db, `rooms/${code}/slots/1`)).catch(() => {});
       await remove(ref(db, `rooms/${code}/meta`)).catch(() => {});
+      if (isPermissionDenied(err)) throw rulesFailure('Firebase rejected your player entry', err);
       throw err;
     }
   }
@@ -157,7 +165,7 @@ export async function joinRoom(code, profile) {
     } catch (err) {
       // Don't leave a slot reserved by a player who never got in.
       await remove(ref(db, `rooms/${code}/slots/${slot}`)).catch(() => {});
-      if (isPermissionDenied(err)) break;
+      if (isPermissionDenied(err)) throw rulesFailure(`Firebase rejected joining room ${code}`, err);
       throw err;
     }
   }
