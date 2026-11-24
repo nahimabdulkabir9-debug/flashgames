@@ -69,8 +69,18 @@ export function signIn() {
       // If nobody is signed in yet, sign in anonymously.
       signInAnonymously(auth).catch(reject);
     });
+    // A failed attempt must not poison every later call: allow a retry.
+    uidPromise.catch(() => { uidPromise = null; });
   }
   return uidPromise;
+}
+
+/** True when Firebase refused a read/write (as opposed to a network error). */
+export function isPermissionDenied(err) {
+  const code = String(err?.code || '');
+  const message = String(err?.message || '');
+  return code === 'PERMISSION_DENIED' || code.includes('permission-denied')
+    || message.includes('PERMISSION_DENIED') || message.includes('Permission denied');
 }
 
 // ---------- Connection status ----------

@@ -94,6 +94,20 @@ body {
 }
 .topbar-actions { display: flex; gap: 8px; }
 
+/* Offline notice: slim, persistent, and out of the way. */
+.connection-banner {
+  max-width: 560px;
+  margin: 0 auto 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--yellow);
+  color: #1a1b2e;
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-align: center;
+}
+.connection-banner[hidden] { display: none; }
+
 /* ---------- Layout ---------- */
 main {
   max-width: 560px;

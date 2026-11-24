@@ -1,7 +1,10 @@
 // pictionary.js: one player draws a secret word, everyone else guesses.
-// The drawer picks the word on their own phone and shares only a hash of it,
-// so guessers cannot read it. The host runs the clock and the scoring.
-import { db, ref, set, update, remove, serverNow } from '../firebase.js';
+// The drawer keeps the real word in gameSecrets (readable only by them while
+// the round is live). Guessers send guesses; the drawer checks them and marks
+// the round solved. The host owns phases, timers and scores.
+import {
+  db, ref, set, update, remove, get, onValue, serverNow, isPermissionDenied,
+} from '../firebase.js';
 import { el, mount, toast } from '../ui.js';
 import { avatarEl } from '../avatars.js';
 
@@ -26,10 +29,14 @@ const pick3 = () => shuffled([...shuffled(WORDS.filter((w) => !isHard(w))).slice
 export default {
   id: 'pictionary', name: 'Pictionary', emoji: '🎨', blurb: 'Draw the word, friends guess it.', minPlayers: 2,
 
-  create(container, session, api) {
+  create(container, session) {
     const gref = (sub = '') => ref(db, `rooms/${session.code}/game${sub}`);
-    let g = null; let myWord = null; let positions = []; let shown = 0; let hintEl = null; let choices = []; let choicesRound = -1;
+    const secretRef = (round) => ref(db, `gameSecrets/${session.code}/${round}`);
+    let g = null; let myWord = null; let positions = []; let shown = 0; let hintEl = null; let choices = []; let choicesRound = '';
     let drawing = null; let color = COLORS[0]; let lastPush = 0; let panelKey = ''; let acting = false; let actKey = '';
+    let secret = null; let stopSecret = null; let secretKey = '';
+    let stopGuesses = null; let guessKey = '';
+    const claimed = new Set(); // guesses this drawer has already scored
 
     const head = el('section', { class: 'card center' });
     const canvas = el('canvas', { class: 'pic-canvas', width: 600, height: 600 });
@@ -46,6 +53,16 @@ export default {
     const order = () => session.playerList().map((p) => p.uid);
     const canDraw = () => g?.phase === 'draw' && g.drawer === session.uid;
     const nameOf = (uid) => session.room.players[uid]?.name || 'Player';
+
+    // An old tab may try to write after the host has changed the rules/game.
+    function noteError(label, err) {
+      console.warn(label, err);
+      if (isPermissionDenied(err)) toast('The game changed. Refresh the page to continue.');
+    }
+    function write(promise, label) {
+      Promise.resolve(promise).catch((err) => noteError(label, err));
+      return promise;
+    }
 
     // ----- Canvas -----
     function redraw() {
@@ -64,7 +81,10 @@ export default {
       const r = canvas.getBoundingClientRect();
       return [Math.round(((e.clientX - r.left) / r.width) * 1000), Math.round(((e.clientY - r.top) / r.height) * 1000)];
     };
-    const push = () => { if (drawing) set(gref(`/strokes/${drawing.id}`), { c: drawing.c, p: drawing.p }).catch(() => {}); };
+    const push = () => {
+      if (drawing) set(gref(`/strokes/${drawing.id}`), { c: drawing.c, p: drawing.p })
+        .catch((err) => console.warn('Stroke sync failed', err));
+    };
     canvas.addEventListener('pointerdown', (e) => {
       if (!canDraw()) return;
       canvas.setPointerCapture(e.pointerId);
@@ -81,30 +101,121 @@ export default {
     canvas.addEventListener('pointercancel', endStroke);
 
     // ----- Host referee -----
-    const act = (fn) => { if (!acting) { acting = true; fn(); } };
+    const act = (fn) => {
+      if (acting) return;
+      acting = true;
+      Promise.resolve().then(fn).catch((err) => {
+        console.warn('Host action failed', err);
+        acting = false;
+      });
+    };
+    function clearRoundFields() {
+      // The host clears these atomically when a round changes. `null` values
+      // are allowed by the rules so stale data never leaks into a new round.
+      return {
+        pick: null, strokes: null, solved: null, guesses: null, repick: null,
+        hash: null, len: null, hint: null, word: null,
+        endsAt: null, overAt: null, voteEndsAt: null, gain: null,
+      };
+    }
     function newRound(r) {
       const ids = order();
-      if (r >= g.total) return update(gref(), { phase: 'final' });
-      return update(gref(), { round: r, drawer: ids[r % ids.length], phase: 'pick', hash: null, word: null, solved: null, strokes: null, gain: null, endsAt: null });
+      if (!ids.length) return;
+      if (r >= g.total) return update(gref(), { ...clearRoundFields(), phase: 'final' });
+      return update(gref(), {
+        ...clearRoundFields(), round: r, drawer: ids[r % ids.length],
+        phase: 'pick', scores: g.scores || {},
+      });
     }
-    function finishRound() {
+    function startDraw() {
+      if (!g.pick) return;
+      return update(gref(), {
+        ...clearRoundFields(),
+        phase: 'draw',
+        hash: g.pick.hash, len: g.pick.len, hint: g.pick.hint,
+        endsAt: serverNow() + DRAW_MS,
+      });
+    }
+    function backToPick() {
+      return update(gref(), { ...clearRoundFields(), phase: 'pick' });
+    }
+    async function finishRound() {
       const scores = { ...(g.scores || {}) }; const gain = {};
       Object.entries(g.solved || {}).forEach(([uid, left]) => {
         gain[uid] = 50 + Math.round((50 * left) / DRAW_MS);
         gain[g.drawer] = (gain[g.drawer] || 0) + 25;
       });
       Object.entries(gain).forEach(([uid, pts]) => { scores[uid] = (scores[uid] || 0) + pts; });
-      update(gref(), { phase: 'over', scores, gain, overAt: serverNow() + OVER_MS });
+      await update(gref(), { phase: 'over', scores, gain, overAt: serverNow() + OVER_MS });
+      // Reveal the word even if the drawer has gone offline. The host may read
+      // the secret now that the phase is over, and can write it to the game.
+      try {
+        const snap = await get(secretRef(g.round));
+        if (snap.val()?.word) await update(gref(), { word: snap.val().word });
+      } catch (err) {
+        console.warn('Could not publish the word', err);
+      }
     }
     function tick() {
       if (!g || !session.isHost) return;
       const now = serverNow(); const players = session.playerList();
-      if (g.phase === 'pick' && players.find((p) => p.uid === g.drawer)?.online === false) act(() => newRound(g.round + 1));
+      if (g.phase === 'pick') {
+        const drawerOnline = players.find((p) => p.uid === g.drawer)?.online !== false;
+        if (!drawerOnline) act(() => newRound(g.round + 1));
+        else if (g.pick) act(startDraw);
+      }
       if (g.phase === 'draw') {
-        const guessers = players.filter((p) => p.uid !== g.drawer && p.online !== false);
-        if (now >= g.endsAt || (guessers.length && guessers.every((p) => g.solved?.[p.uid]))) act(finishRound);
+        if (g.repick) act(backToPick);
+        else {
+          const guessers = players.filter((p) => p.uid !== g.drawer && p.online !== false);
+          if (now >= g.endsAt || (guessers.length && guessers.every((p) => g.solved?.[p.uid]))) act(finishRound);
+        }
       }
       if (g.phase === 'over' && now >= g.overAt) act(() => newRound(g.round + 1));
+    }
+
+    // ----- Secret word (drawer only while the round is live) -----
+    function watchSecret() {
+      const mine = Boolean(g && (g.phase === 'pick' || g.phase === 'draw') && g.drawer === session.uid);
+      const key = mine ? `${session.code}/${g.round}` : '';
+      if (key === secretKey) return;
+      if (stopSecret) { stopSecret(); stopSecret = null; }
+      secretKey = key;
+      secret = null; myWord = null; positions = []; shown = 0; panelKey = '';
+      if (!key) return;
+      stopSecret = onValue(secretRef(g.round), (snap) => {
+        const s = snap.val();
+        if (!s || s.round !== g?.round || s.drawer !== session.uid) {
+          secret = null; myWord = null; positions = []; shown = 0; panelKey = '';
+        } else {
+          secret = s;
+          myWord = s.word;
+          positions = String(s.positions || '').split(',').filter(Boolean).map(Number);
+          shown = 0; panelKey = '';
+        }
+        renderPanel();
+      }, (err) => console.warn('Secret listener error', err));
+    }
+
+    // ----- Guess checking (drawer only) -----
+    function watchGuesses() {
+      const mine = Boolean(g && g.phase === 'draw' && g.drawer === session.uid);
+      const key = mine ? `${session.code}/${g.round}` : '';
+      if (key === guessKey) return;
+      if (stopGuesses) { stopGuesses(); stopGuesses = null; }
+      guessKey = key;
+      if (!key) return;
+      stopGuesses = onValue(gref('/guesses'), (snap) => {
+        const guesses = snap.val() || {};
+        Object.entries(guesses).forEach(([uid, text]) => {
+          const id = `${g?.round}|${uid}`;
+          if (uid === session.uid || !myWord || g.solved?.[uid] || claimed.has(id)) return;
+          if (norm(text) !== norm(myWord)) return;
+          claimed.add(id);
+          set(gref(`/solved/${uid}`), Math.max(1, (g.endsAt || serverNow()) - serverNow()))
+            .catch((err) => { claimed.delete(id); console.warn('Could not mark guess', err); });
+        });
+      }, (err) => console.warn('Guess listener error', err));
     }
 
     // ----- Letter hints -----
@@ -114,29 +225,40 @@ export default {
       if (!myWord || g?.phase !== 'draw' || g.drawer !== session.uid) return;
       const left = (g.endsAt - serverNow()) / DRAW_MS;
       const due = (positions.length > 1 ? [0.55, 0.25] : [0.45]).filter((t) => left <= t).length;
-      if (due > shown) { shown = due; update(gref(), { hint: maskHint(due) }); }
+      if (due > shown) {
+        shown = due;
+        update(gref(), { hint: maskHint(due) }).catch((err) => console.warn('Hint sync failed', err));
+      }
     }
 
     // ----- Player actions -----
+    async function pickWord(word) {
+      const nextPositions = shuffled(Array.from(word, (_, i) => i)).slice(0, isHard(word) ? 2 : 1);
+      await set(secretRef(g.round), {
+        drawer: session.uid, round: g.round, word, positions: nextPositions.join(','),
+      });
+      myWord = word; positions = nextPositions; shown = 0;
+      await set(gref('/pick'), {
+        hash: await hash(word, `${session.code}${g.round}`), len: word.length, hint: maskHint(0),
+      });
+    }
     async function choose(word) {
       try {
         await pickWord(word);
       } catch (err) {
-        console.error(err);
-        toast(`Could not start drawing: ${err.message}`);
+        noteError('Could not choose a word', err);
+        toast('Could not choose that word. Try again.');
       }
     }
-    async function pickWord(word) {
-      myWord = word; shown = 0;
-      positions = shuffled(Array.from(word, (_, i) => i)).slice(0, isHard(word) ? 2 : 1);
-      await update(gref(), { phase: 'draw', hash: await hash(word, `${session.code}${g.round}`), len: word.length, hint: maskHint(0), endsAt: serverNow() + DRAW_MS });
-    }
     async function guess(text) {
-      if (norm(text).length === 0) return;
-      if ((await hash(text, `${session.code}${g.round}`)) === g.hash) {
-        await set(gref(`/solved/${session.uid}`), Math.max(1, g.endsAt - serverNow()));
-        toast('Correct! 🎉');
-      } else toast('Not quite. Try again!');
+      const answer = text.trim().slice(0, 30);
+      if (!norm(answer)) return;
+      try {
+        await set(gref(`/guesses/${session.uid}`), answer);
+        toast('Guess sent!');
+      } catch (err) {
+        noteError('Guess failed', err);
+      }
     }
 
     // ----- Screens -----
@@ -145,26 +267,35 @@ export default {
       hintEl = null;
       if (g.phase === 'pick') {
         if (g.drawer === session.uid) {
-          if (choicesRound !== g.round) { choices = pick3(); choicesRound = g.round; }
-          kids.push(el('h2', {}, 'Choose a word to draw'), ...choices.map((w) => el('button', { class: 'btn', type: 'button', onclick: () => choose(w) }, `${w} (${isHard(w) ? 'hard' : 'easy'})`)));
+          const choiceKey = `${g.round}|${Boolean(g.repick)}`;
+          if (choicesRound !== choiceKey) { choices = pick3(); choicesRound = choiceKey; }
+          kids.push(el('h2', {}, 'Choose a word to draw'),
+            ...choices.map((w) => el('button', { class: 'btn', type: 'button', onclick: () => choose(w) }, `${w} (${isHard(w) ? 'hard' : 'easy'})`)),
+            g.pick ? el('p', { class: 'muted center' }, 'Word saved. You can choose again or wait for the host.') : null);
         } else kids.push(el('p', { class: 'muted center' }, `${nameOf(g.drawer)} is choosing a word…`));
       } else if (g.phase === 'draw') {
         if (g.drawer === session.uid) {
           kids.push(el('h2', {}, `Draw: ${myWord || '…'}`),
+            myWord ? null : el('p', { class: 'muted center' }, 'Your word could not be restored. Use repick to choose another.'),
             el('div', { class: 'swatches' }, COLORS.map((c) => el('button', {
               class: 'swatch', type: 'button', style: `background:${c}`, 'aria-label': 'Pen colour', onclick: () => { color = c; },
             }))),
-            el('button', { class: 'btn secondary', type: 'button', onclick: () => remove(gref('/strokes')) }, '🧹 Clear drawing'));
+            el('button', { class: 'btn secondary', type: 'button', onclick: () => write(remove(gref('/strokes')), 'Clear failed') }, '🧹 Clear drawing'),
+            el('button', {
+              class: 'btn secondary', type: 'button',
+              onclick: () => write(set(gref('/repick'), true), 'Repick failed'),
+            }, '🔁 Can’t draw this word'));
         } else if (g.solved?.[session.uid]) {
           kids.push(el('p', { class: 'center' }, '✅ You got it! Waiting for the others…'));
         } else {
           const input = el('input', { class: 'input', type: 'text', autocomplete: 'off', placeholder: 'Type your guess', enterkeyhint: 'send' });
           const send = () => { guess(input.value); input.value = ''; input.focus(); };
           input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
-          kids.push((hintEl = el('p', { class: 'center hint' }, g.hint || Array(g.len || 0).fill('_').join(' '))), input, el('button', { class: 'btn', type: 'button', onclick: send }, 'Guess'));
+          kids.push((hintEl = el('p', { class: 'center hint' }, g.hint || Array(g.len || 0).fill('_').join(' '))), input,
+            el('button', { class: 'btn', type: 'button', onclick: send }, 'Guess'));
         }
       } else if (g.phase === 'over') {
-        kids.push(el('h2', { class: 'center' }, `The word was “${g.word || '…'}”`),
+        kids.push(el('h2', { class: 'center' }, `The word was “${g.word || secret?.word || '…'}”`),
           ...Object.entries(g.gain || {}).map(([uid, pts]) => el('p', { class: 'center' }, `${nameOf(uid)} +${pts}`)),
           Object.keys(g.gain || {}).length ? null : el('p', { class: 'muted center' }, 'Nobody guessed it.'));
       } else {
@@ -187,10 +318,21 @@ export default {
     return {
       update(room) {
         const prev = g; g = room.game || null;
-        if (!g) { if (session.isHost) set(gref(), { round: 0, total: order().length * ROUNDS_EACH, drawer: order()[0], phase: 'pick', scores: {} }); return; }
-        if (actKey !== `${g.round}${g.phase}`) { actKey = `${g.round}${g.phase}`; acting = false; }
-        if (g.phase === 'over' && g.drawer === session.uid && myWord && !g.word) update(gref(), { word: myWord });
-        const key = `${g.round}|${g.phase}|${Boolean(g.solved?.[session.uid])}|${g.word || ''}|${prev === null}`;
+        watchSecret();
+        watchGuesses();
+        if (!g) {
+          if (session.isHost) write(set(gref(), {
+            round: 0, total: order().length * ROUNDS_EACH, drawer: order()[0],
+            phase: 'pick', scores: {},
+          }), 'Could not start Pictionary');
+          return;
+        }
+        const actionKey = `${g.round}|${g.phase}|${Boolean(g.repick)}`;
+        if (actKey !== actionKey) { actKey = actionKey; acting = false; claimed.clear(); }
+        if (g.phase === 'over' && g.drawer === session.uid && myWord && !g.word) {
+          write(update(gref(), { word: myWord }), 'Could not reveal the word');
+        }
+        const key = `${g.round}|${g.phase}|${Boolean(g.solved?.[session.uid])}|${g.word || ''}|${Boolean(g.pick)}|${Boolean(g.repick)}|${Boolean(secret)}|${prev === null}`;
         if (key !== panelKey) { panelKey = key; renderPanel(); }
         mount(head, el('h2', {}, `Round ${Math.min(g.round + 1, g.total)} of ${g.total} `, timer),
           el('p', { class: 'muted' }, g.phase === 'draw' ? `${nameOf(g.drawer)} is drawing` : 'Pictionary · v2'));
@@ -203,7 +345,11 @@ export default {
         endBtn.hidden = !(session.isHost && g.phase !== 'final');
         redraw();
       },
-      destroy() { clearInterval(clock); },
+      destroy() {
+        clearInterval(clock);
+        if (stopSecret) stopSecret();
+        if (stopGuesses) stopGuesses();
+      },
     };
   },
 };

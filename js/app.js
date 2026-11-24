@@ -13,6 +13,7 @@ import { el, mount, toast, showModal } from './ui.js';
 import { load, save } from './storage.js';
 
 const app = document.getElementById('app');
+const connectionBanner = document.getElementById('connection-banner');
 const params = new URLSearchParams(location.search);
 document.title = APP_NAME;
 document.getElementById('brand-name').textContent = APP_NAME;
@@ -42,6 +43,19 @@ let gamesModule;  // games/registry.js
 let running = null; // the game on screen: { id, game }
 let stopPublic = null; // stops the public-room list when we leave the home screen
 
+// Anonymous sign-in can fail because the network is briefly down. A failed
+// promise must not poison every later call, so try a few times with backoff.
+async function signInWithRetry(signIn, tries = 3) {
+  let lastError;
+  for (let i = 0; i < tries; i += 1) {
+    try { return await signIn(); } catch (err) {
+      lastError = err;
+      if (i < tries - 1) await new Promise((resolve) => setTimeout(resolve, 500 * (2 ** i)));
+    }
+  }
+  throw lastError;
+}
+
 async function start() {
   if (params.has('check') || !isFirebaseConfigured()) {
     const { runConnectionCheck } = await import('./check.js');
@@ -50,12 +64,20 @@ async function start() {
 
   // Load the Firebase-dependent modules only after the config check.
   // They are small, so we load them all at once, in parallel.
-  const [{ signIn }, room] = await Promise.all([import('./firebase.js'), import('./room.js')]);
+  const [{ signIn, onConnectionChange }, room] = await Promise.all([import('./firebase.js'), import('./room.js')]);
   [homeModule, lobbyModule, gamesModule] = await Promise.all([import('./home.js'), import('./lobby.js'), import('./games/registry.js')]);
+
+  // A persistent, quiet banner is better than a toast that disappears while
+  // you are still offline. Firebase keeps trying to reconnect by itself.
+  onConnectionChange((online) => {
+    if (!connectionBanner) return;
+    connectionBanner.hidden = online;
+    connectionBanner.textContent = online ? '' : 'Offline — reconnecting…';
+  });
 
   let uid;
   try {
-    uid = await signIn();
+    uid = await signInWithRetry(signIn);
   } catch (err) {
     console.error(err);
     mount(app, el('section', { class: 'card' },
@@ -68,12 +90,20 @@ async function start() {
   // Which room should we be in? A ?room= link wins; otherwise the room
   // saved from last time (for when the address was lost).
   const invited = room.normalizeCode(params.get('room'));
-  const lastRoom = load('lastRoom');
-  const candidate = room.isValidCode(invited) ? invited : lastRoom;
+  const saved = room.normalizeCode(load('lastRoom'));
+  const candidate = room.isValidCode(invited) ? invited : (room.isValidCode(saved) ? saved : '');
 
-  if (candidate && await room.stillInRoom(candidate)) {
-    // Rejoin silently: we never left this room (we just refreshed).
-    return enterRoom(candidate, uid, room);
+  if (candidate) {
+    let inRoom = false;
+    try {
+      inRoom = await room.stillInRoom(candidate);
+    } catch (err) {
+      // A network failure is not proof that we were kicked. Keep the room
+      // and join optimistically; the live listener will correct us if not.
+      console.warn('Could not confirm room membership; rejoining optimistically', err);
+      inRoom = true;
+    }
+    if (inRoom) return enterRoom(candidate, uid, room);
   }
   save('lastRoom', null);
   showHome(room.isValidCode(invited) ? invited : '', uid, room);
@@ -92,7 +122,21 @@ function showHome(invitedCode, uid, room) {
 }
 
 // Show the lobby, or the game the host started.
-function stopGame() { running?.game.destroy(); running = null; }
+function stopGame() {
+  try { running?.game.destroy(); } catch (err) { console.warn('Game cleanup failed', err); }
+  running = null;
+}
+function showGameError(session) {
+  mount(app, el('section', { class: 'card stack' },
+    el('h2', {}, 'Something went wrong in this game'),
+    el('p', { class: 'muted' }, session.isHost
+      ? 'Restarting returns everyone to the lobby.'
+      : 'Ask the host to restart the game.'),
+    session.isHost ? el('button', {
+      class: 'btn', type: 'button',
+      onclick: () => session.endGame().catch((err) => console.warn('Could not end the game', err)),
+    }, 'Back to lobby') : null));
+}
 function showRoom(session, r, onLeave) {
   const def = r.meta.status === 'playing' ? gamesModule.getGame(r.meta.gameId) : null;
   if (!def) {
@@ -103,9 +147,22 @@ function showRoom(session, r, onLeave) {
     stopGame();
     const box = el('div');
     mount(app, box);
-    running = { id: def.id, game: def.create(box, session, {}) };
+    try {
+      running = { id: def.id, game: def.create(box, session, {}) };
+    } catch (err) {
+      console.error('Game could not start', err);
+      showGameError(session);
+      return;
+    }
   }
-  running.game.update(r);
+  try {
+    running.game.update(r);
+  } catch (err) {
+    // One broken game screen must not take down the whole app.
+    console.error('Game screen failed', err);
+    stopGame();
+    showGameError(session);
+  }
 }
 
 function enterRoom(code, uid, room) {

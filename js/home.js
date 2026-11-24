@@ -141,7 +141,9 @@ export function renderHome(container, { invitedCode = '', onCreate, onJoin, onQu
   }, '⚡ Quick play');
   const publicList = el('ul', { class: 'player-list' }, el('li', { class: 'muted' }, 'Looking for rooms…'));
   const publicCard = el('section', { class: 'card stack' }, el('h2', {}, '🌍 Public rooms'), publicList, quickBtn);
-  if (watchPublic) {
+  // The invited view hides the public list, so don't leave a listener running
+  // just to update a card that is not on screen.
+  if (watchPublic && !invitedCode) {
     watchPublic((rooms) => {
       publicList.replaceChildren(...(rooms.length ? rooms.map((r) => el('li', { class: 'player' },
         el('span', { class: 'player-avatar', 'aria-hidden': 'true' }, avatarEl(r.avatar, 44)),

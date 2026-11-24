@@ -29,6 +29,8 @@ See [PROGRESS.md](PROGRESS.md) for what is built so far and what comes next.
 | `icons/` | App icon, drawn in SVG. |
 | `firebase/database.rules.json` | Security rules you publish to Firebase. |
 | `firebase.json` | Settings for the local Firebase Emulator. |
+| `tests/rules.test.js` | Emulator-backed regression tests for the security rules. |
+| `package.json` | Dev-only dependencies/scripts for those tests; the site has no build step. |
 
 ---
 
@@ -42,7 +44,7 @@ See [PROGRESS.md](PROGRESS.md) for what is built so far and what comes next.
 6. **Get your web config.** Click the ⚙️ gear next to **Project Overview → Project settings**. Under **Your apps**, click the web icon **`</>`**. Give it a nickname such as `flashgames-web`, leave "Firebase Hosting" unticked, and click **Register app**. You will see a `firebaseConfig = { ... }` block. Copy its values into `js/config.js`, replacing every `PASTE_...` value.
    - If `databaseURL` is missing from that block, copy the URL shown at the top of the **Realtime Database → Data** tab (it ends in `firebasedatabase.app` or `firebaseio.com`).
 7. **Allow your live website to log in.** Open **Authentication → Settings → Authorized domains**, click **Add domain**, type `nahimabdulkabir9-debug.github.io` and click **Add**.
-   - Type only the domain: no `https://`, no `/Test-repo` path. One entry covers every repo on that account.
+   - Type only the domain: no `https://`, no `/flashgames` path. One entry covers every repo on that account.
    - `localhost` is already in the list, so local testing works without this step.
 
 To check everything is connected, open the site with `?check=1` at the end of the address (for example <http://localhost:8000/?check=1>).
@@ -63,7 +65,7 @@ Never commit a **service account key** (a JSON file with `"private_key"` in it) 
 You need any simple web server, because browsers block ES modules opened straight from a file. Python is enough:
 
 ```bash
-cd Test-repo
+# from this folder
 python -m http.server 8000
 ```
 
@@ -71,17 +73,42 @@ Then open <http://localhost:8000> in your browser. For two players, open a secon
 
 ### Optional: the Firebase Emulator (no real project needed)
 
-The emulator is a fake Firebase that runs on your computer. Good for experimenting without touching real data. It needs [Node.js](https://nodejs.org) and Java installed.
+The emulator is a fake Firebase that runs on your computer. Good for experimenting without touching real data. It needs [Node.js](https://nodejs.org) and **Java 21 or newer** (older Java versions are rejected by current `firebase-tools`).
 
 ```bash
 npm install -g firebase-tools
 firebase emulators:start --project demo-flashgames
 ```
 
+If you don't want a global CLI, use `npx --yes firebase-tools` in place of `firebase` in any command below. On Windows, if `java` is not recognised after installing, add the JDK's `bin` folder to your PATH.
+
 Keep that running, start the Python server in another terminal, and open <http://localhost:8000/?emulator=1>. The `?emulator=1` switch only works on localhost, so it can never affect the live site. You can watch the data change at <http://localhost:4000>.
+
+### Rules regression tests
+
+The site itself still has no build step. `npm` is only needed if you want to run the security-rule tests:
+
+```bash
+npm install              # first time only
+npm test                 # pure game-rule logic, no emulator needed
+npm run test:rules       # with the emulator running from the command above
+```
+
+You can also run the emulator and the rules tests together:
+
+```bash
+npx --yes firebase-tools emulators:exec --project demo-flashgames --only database "npm run test:rules"
+```
+
+The tests check the important permissions: host-only game state, drawer-only secrets and solved marks, player-owned answers/stop requests, the 16-slot room cap, last-player room deletion, and stale public-room pruning. Add a case there before changing a rule.
 
 ---
 
 ## Deploying
 
-Covered in milestone (h). This section will explain GitHub Pages setup and how to redeploy after each update.
+1. Commit and push to `main`.
+2. In GitHub, open **Settings → Pages**, set **Source** to **Deploy from a branch**, choose `main` and `/ (root)`, then save. The first build may take a minute.
+3. The live site is <https://nahimabdulkabir9-debug.github.io/flashgames/>.
+4. If `firebase/database.rules.json` changed, publish it in **Firebase Console → Realtime Database → Rules**. Rules and client code must ship together: publish the rules before/with the pushed JS. Anyone with an old tab open should refresh.
+
+---

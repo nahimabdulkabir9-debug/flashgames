@@ -1,0 +1,15 @@
+{
+  "name": "flashgames",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Static party games site; npm is only needed for local Firebase rules tests.",
+  "scripts": {
+    "test": "node --test tests/npat.test.js",
+    "test:rules": "node --test tests/rules.test.js"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^6.0.0",
+    "firebase": "^13.0.0"
+  }
+}

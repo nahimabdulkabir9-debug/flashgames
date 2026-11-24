@@ -49,14 +49,19 @@ export function toast(message, ms = 2500) {
  * Every action closes the popup after running its onClick.
  */
 export function showModal({ title, body = [], actions = [{ label: 'OK' }] }) {
-  const close = () => overlay.remove();
+  const previousFocus = document.activeElement;
+  const close = () => {
+    document.removeEventListener('keydown', onKeydown, true);
+    overlay.remove();
+    if (previousFocus instanceof HTMLElement) previousFocus.focus();
+  };
   const buttons = actions.map(({ label, onClick, style = '' }) =>
     el('button', {
       class: `btn ${style}`,
       type: 'button',
       onclick: () => { close(); if (onClick) onClick(); },
     }, label));
-  const dialog = el('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+  const dialog = el('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title, tabindex: -1 },
     el('h2', {}, title),
     el('div', { class: 'modal-body' }, body),
     el('div', { class: 'stack' }, buttons));
@@ -64,7 +69,31 @@ export function showModal({ title, body = [], actions = [{ label: 'OK' }] }) {
     class: 'overlay',
     onclick: (event) => { if (event.target === overlay) close(); },
   }, dialog);
+
+  // Keep keyboard focus inside the popup until it is closed.
+  function focusable() {
+    return [...dialog.querySelectorAll('button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+      .filter((node) => !node.disabled);
+  }
+  function onKeydown(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const items = focusable();
+    if (!items.length) { event.preventDefault(); dialog.focus(); return; }
+    const first = items[0]; const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus();
+    }
+  }
+
   document.body.append(overlay);
+  document.addEventListener('keydown', onKeydown, true);
   buttons[0]?.focus();
   return close;
 }

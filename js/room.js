@@ -9,12 +9,14 @@
 //
 // How a room is stored in Firebase:
 //   rooms/ABCDE/meta            { hostUid, createdAt, status, gameId, settings }
-//   rooms/ABCDE/players/<uid>   { name, avatar, joinedAt, ready, online, lastSeen }
+//   rooms/ABCDE/slots/1..16     <uid>  (one claimed slot per player; caps the room)
+//   rooms/ABCDE/players/<uid>   { name, avatar, joinedAt, slot, ready, online, lastSeen }
 //   rooms/ABCDE/kicked/<uid>    true   (kicked players can't come back)
 // =============================================================
 
 import {
-  db, signIn, serverNow, ref, get, set, update, remove, onValue, onDisconnect, serverTimestamp,
+  db, signIn, serverNow, ref, get, set, update, remove, runTransaction, onValue, onDisconnect, serverTimestamp,
+  isPermissionDenied,
 } from './firebase.js';
 
 export const MAX_PLAYERS_PER_ROOM = 16;
@@ -37,11 +39,20 @@ export function isValidCode(code) {
 }
 
 function randomCode() {
-  const bytes = crypto.getRandomValues(new Uint8Array(5));
-  return Array.from(bytes, (b) => CODE_LETTERS[b % CODE_LETTERS.length]).join('');
+  // Rejection sampling keeps every letter equally likely (256 is not a
+  // multiple of 24, so a plain modulo would favour the first few letters).
+  const letters = [];
+  while (letters.length < 5) {
+    const bytes = crypto.getRandomValues(new Uint8Array(8));
+    for (const byte of bytes) {
+      if (byte < 240) letters.push(CODE_LETTERS[byte % CODE_LETTERS.length]);
+      if (letters.length === 5) break;
+    }
+  }
+  return letters.join('');
 }
 
-/** The link friends open to join this room, e.g. .../Test-repo/?room=ABCDE */
+/** The link friends open to join this room, e.g. .../flashgames/?room=ABCDE */
 export function roomLink(code) {
   return `${location.origin}${location.pathname}?room=${code}`;
 }
@@ -56,25 +67,33 @@ export async function createRoom(profile, { isPublic = false } = {}) {
 
     // One multi-path update writes the room and our player entry together:
     // either both succeed or neither does.
-    await update(ref(db), {
-      [`rooms/${code}/meta`]: {
-        hostUid: uid,
-        createdAt: serverTimestamp(),
-        status: 'lobby',
-        public: Boolean(isPublic),
-      },
-      [`rooms/${code}/players/${uid}`]: newPlayer(profile),
-    });
-    return code;
+    try {
+      await update(ref(db), {
+        [`rooms/${code}/meta`]: {
+          hostUid: uid,
+          createdAt: serverTimestamp(),
+          status: 'lobby',
+          public: Boolean(isPublic),
+        },
+        [`rooms/${code}/slots/1`]: uid,
+        [`rooms/${code}/players/${uid}`]: newPlayer(profile, '1'),
+      });
+      return code;
+    } catch (err) {
+      // Someone else grabbed the same code between our read and write.
+      // The rules refuse the overwrite, so try another code.
+      if (!isPermissionDenied(err)) throw err;
+    }
   }
   throw new RoomError('Could not find a free room code. Please try again.');
 }
 
-function newPlayer(profile) {
+function newPlayer(profile, slot) {
   return {
     name: profile.name,
     avatar: profile.avatar,
     joinedAt: serverTimestamp(),
+    slot: String(slot),
     ready: false,
     online: true,
   };
@@ -103,19 +122,36 @@ export async function joinRoom(code, profile) {
     return code;
   }
 
-  await set(meRef, newPlayer(profile));
+  // Claim a slot first. There are only 16 slots, so the cap is enforced by
+  // the database rather than by a race-prone count. A transaction makes two
+  // people picking the same free slot safe.
+  const slotsSnap = await get(ref(db, `rooms/${code}/slots`));
+  const slots = slotsSnap.val() || {};
+  const freeSlots = Array.from({ length: MAX_PLAYERS_PER_ROOM }, (_, i) => String(i + 1))
+    .filter((slot) => !slots[slot]);
 
-  // Now that we are a member we can count players. If the room is over
-  // the limit and we are one of the newest, step back out.
-  const playersSnap = await get(ref(db, `rooms/${code}/players`));
-  const players = Object.entries(playersSnap.val() || {})
-    .sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
-  const myPosition = players.findIndex(([id]) => id === uid);
-  if (myPosition >= MAX_PLAYERS_PER_ROOM) {
-    await remove(meRef);
-    throw new RoomError(`Room ${code} is full (${MAX_PLAYERS_PER_ROOM} players max).`);
+  for (const slot of freeSlots) {
+    let claimed;
+    try {
+      claimed = await runTransaction(ref(db, `rooms/${code}/slots/${slot}`), (current) => current || uid);
+    } catch (err) {
+      if (isPermissionDenied(err)) break;
+      throw err;
+    }
+    // Another player won this slot; try the next one.
+    if (claimed.snapshot.val() !== uid) continue;
+
+    try {
+      await set(meRef, newPlayer(profile, slot));
+      return code;
+    } catch (err) {
+      // Don't leave a slot reserved by a player who never got in.
+      await remove(ref(db, `rooms/${code}/slots/${slot}`)).catch(() => {});
+      if (isPermissionDenied(err)) break;
+      throw err;
+    }
   }
-  return code;
+  throw new RoomError(`Room ${code} is full (${MAX_PLAYERS_PER_ROOM} players max) or no longer open.`);
 }
 
 /**
@@ -127,8 +163,12 @@ export async function stillInRoom(code) {
   try {
     const snap = await get(ref(db, `rooms/${code}/players/${uid}`));
     return snap.exists();
-  } catch {
-    return false;
+  } catch (err) {
+    // "No permission" means we are not a member (kicked or room gone).
+    // A network failure is different: the caller should keep the room and
+    // try to rejoin optimistically instead of clearing lastRoom.
+    if (isPermissionDenied(err)) return false;
+    throw err;
   }
 }
 
@@ -185,8 +225,14 @@ export class RoomSession {
       this.checkHost();
       this.syncPublic();
       this.onUpdate(room);
-    }, async () => {
-      // Permission denied = we are no longer a member. Find out why.
+    }, async (err) => {
+      // A network wobble is not a removal. Keep the session alive and let
+      // Firebase reconnect; only an explicit permission denial means we
+      // are no longer a member.
+      if (!isPermissionDenied(err)) {
+        console.warn('Room listener lost connection', err);
+        return;
+      }
       let kicked = false;
       try { kicked = (await get(ref(db, this.path(`kicked/${this.uid}`)))).exists(); } catch { /* room gone */ }
       this.handleRemoved(kicked ? 'The host removed you from the room.' : 'You are no longer in this room.');
@@ -248,6 +294,7 @@ export class RoomSession {
       return;
     }
     const me = players[this.uid];
+    if (!me) return; // removed while a public-listing update was in flight
     const key = `${Object.keys(players).length}|${me.name}|${me.avatar}`;
     if (key === this.listedKey) return;
     this.listedKey = key;
@@ -258,13 +305,18 @@ export class RoomSession {
   }
 
   /** Host only: start a game from the registry. */
-  startGame(gameId) {
-    return update(ref(db, this.path('meta')), { gameId, status: 'playing' });
+  async startGame(gameId) {
+    await update(ref(db, this.path('meta')), { gameId, status: 'playing' });
+    // A previous game may have left secret words behind.
+    await remove(ref(db, `gameSecrets/${this.code}`)).catch(() => {});
   }
 
   /** Host only: end the game and go back to the lobby. */
-  endGame() {
-    return update(ref(db, this.path()), { 'meta/status': 'lobby', 'meta/gameId': null, game: null });
+  async endGame() {
+    await update(ref(db, this.path()), { 'meta/status': 'lobby', 'meta/gameId': null, game: null });
+    // Pictionary keeps the drawer's word outside the room node so guessers
+    // cannot read it. Clear it when the game ends.
+    await remove(ref(db, `gameSecrets/${this.code}`)).catch(() => {});
   }
 
   /** Host only: make the room public or private. */
@@ -280,9 +332,11 @@ export class RoomSession {
   /** Host only: remove a player and stop them rejoining. */
   async kick(uid) {
     if (!this.isHost || uid === this.uid) return;
-    await update(ref(db, this.path()), {
-      [`kicked/${uid}`]: true,
-      [`players/${uid}`]: null,
+    const slot = this.room?.players?.[uid]?.slot;
+    await update(ref(db), {
+      [`${this.path()}/kicked/${uid}`]: true,
+      [`${this.path()}/players/${uid}`]: null,
+      ...(slot ? { [`${this.path()}/slots/${slot}`]: null } : {}),
     });
   }
 
@@ -290,13 +344,29 @@ export class RoomSession {
   async leave() {
     this.left = true;
     try {
-      if (this.isHost) {
-        await remove(ref(db, `publicRooms/${this.code}`)).catch(() => {});
-        const next = this.playerList().find((p) => p.uid !== this.uid && p.online !== false && !p.isBot);
-        if (next) await set(ref(db, this.path('meta/hostUid')), next.uid);
-      }
+      if (this.isHost) await remove(ref(db, `publicRooms/${this.code}`)).catch(() => {});
       await onDisconnect(this.meRef).cancel();
-      await remove(this.meRef);
+
+      const slots = Object.keys(this.room?.slots || {});
+      const mySlot = this.room?.players?.[this.uid]?.slot;
+      const lastOne = slots.length
+        ? slots.length === 1 && slots[0] === mySlot
+        : this.playerList().length === 1;
+
+      if (lastOne) {
+        // Last player out: close the room instead of leaving an empty
+        // shell behind. The rules check that no other slot is claimed.
+        await remove(ref(db, this.path()));
+      } else {
+        const changes = {};
+        if (this.isHost) {
+          const next = this.playerList().find((p) => p.uid !== this.uid && p.online !== false && !p.isBot);
+          if (next) changes[`${this.path()}/meta/hostUid`] = next.uid;
+        }
+        if (mySlot) changes[`${this.path()}/slots/${mySlot}`] = null;
+        changes[`${this.path()}/players/${this.uid}`] = null;
+        await update(ref(db), changes);
+      }
     } catch (err) {
       console.warn('Leave failed', err);
     }
@@ -320,12 +390,28 @@ export class RoomSession {
 
 // ---------- Public rooms ----------
 const FRESH_MS = 90000; // hide listings whose host has not refreshed them for 90 s
+const STALE_MS = 120000; // rules allow anyone to delete listings this old
 
-function freshRooms(value) {
-  return Object.entries(value || {})
-    .map(([code, r]) => ({ code, ...r }))
-    .filter((r) => serverNow() - (r.updatedAt || 0) < FRESH_MS && r.players < MAX_PLAYERS_PER_ROOM)
+function allPublicRooms(value) {
+  return Object.entries(value || {}).map(([code, r]) => ({ code, ...r }));
+}
+function isFresh(room) {
+  return serverNow() - (room.updatedAt || 0) < FRESH_MS;
+}
+function pruneStale(rooms) {
+  rooms
+    .filter((r) => serverNow() - (r.updatedAt || 0) >= STALE_MS)
+    .forEach((r) => remove(ref(db, `publicRooms/${r.code}`)).catch(() => {}));
+}
+function openRooms(rooms) {
+  return rooms
+    .filter((r) => isFresh(r) && r.players < MAX_PLAYERS_PER_ROOM)
     .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+function freshRooms(value) {
+  const all = allPublicRooms(value);
+  pruneStale(all);
+  return openRooms(all);
 }
 
 /** Live list of open public rooms. Returns a function that stops listening. */

@@ -20,6 +20,7 @@ This file is the hand-over note. Anyone (or any new Claude session) picking up t
 - [ ] **(d) Game 1: Herd Mentality.** 60+ questions in JSON, answer normalising and fuzzy matching.
 - [ ] **(e) Solo mode and bots.**
 - [ ] **(f) Security rules and cleanup.** Full rules, room-creation rate limit, inactive room deletion, profanity filter.
+  - [x] **(f, integrity pass)** Host-authoritative game writes, per-player subtrees, strict validation, drawer-validated Pictionary guesses and secrets, fair NPAT stop/votes, reconnect handling, room/public-listing cleanup, emulator-verified rules regression tests. Still later: creation rate limit and full TTL cleanup.
 - [ ] **(g) PWA and polish.** Manifest, service worker under a subpath, PNG icons.
 - [ ] **(h) Deploy to GitHub Pages.** README deploy + redeploy steps, live link.
 - [ ] **(i) Remaining games**, 2 or 3 at a time (see list below).
@@ -44,10 +45,11 @@ This file is the hand-over note. Anyone (or any new Claude session) picking up t
 
 ## Notes for whoever continues
 
-- Data model: `rooms/<CODE>/meta` (hostUid, createdAt, status, gameId, settings), `rooms/<CODE>/players/<uid>`, `rooms/<CODE>/kicked/<uid>`. Only room members can read a room; only the host can change meta.
+- Data model: `rooms/<CODE>/meta` (hostUid, createdAt, status, gameId, settings), `rooms/<CODE>/slots/1..16` (claimed slot per player, so the cap is enforced by rules), `rooms/<CODE>/players/<uid>` (includes its slot), `rooms/<CODE>/kicked/<uid>`. Only room members can read a room; only the host can change meta.
+- Game state is host-authoritative: the host writes phases/timers/scores; players write only their own answers, votes, checks, guesses and stop requests; the current Pictionary drawer writes strokes/hints, secret words and solved marks. The word lives in `gameSecrets/<CODE>/<round>` so guessers cannot read it during a round.
 - Host promotion is client-side: the earliest-joined online human takes over when the host has been offline for 6 s (`HOST_GRACE_MS` in room.js); the rules allow taking over only when the host is offline or gone.
 - Firebase project: `flashgames-5b774` (database in europe-west1). Rules must be re-published in the console every time `firebase/database.rules.json` changes.
-- Repo: `Notblank-Codes/Test-repo`, work happens on branch `flashgames`.
-- Live site will be `https://notblank-codes.github.io/Test-repo/`.
+- Repo: `nahimabdulkabir9-debug/flashgames`, work happens on branch `main`.
+- Live site: `https://nahimabdulkabir9-debug.github.io/flashgames/`.
 - Firebase SDK version is pinned in `js/firebase.js` (10.12.2). Change all three import URLs together.
 - Local emulator: `firebase emulators:start --project demo-flashgames`, then open `http://localhost:8000/?emulator=1`.

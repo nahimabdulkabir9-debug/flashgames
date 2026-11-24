@@ -1,6 +1,6 @@
 // wordcookies.js: Word Cookies. Everyone gets the same letters and races to find the hidden words.
 // The first player to find a word claims it. Longer words score more.
-import { db, ref, set, update, runTransaction, serverNow } from '../firebase.js';
+import { db, ref, set, update, runTransaction, serverNow, isPermissionDenied } from '../firebase.js';
 import { el, mount, toast } from '../ui.js';
 import { avatarEl } from '../avatars.js';
 
@@ -20,6 +20,14 @@ export default {
     const level = () => LEVELS[g.levels[g.round]];
     const nameOf = (uid) => session.room.players[uid]?.name || 'Player';
     const avatarOf = (uid) => session.room.players[uid]?.avatar || '🙂';
+
+    function write(promise, label) {
+      Promise.resolve(promise).catch((err) => {
+        console.warn(label, err);
+        if (isPermissionDenied(err)) toast('The game changed. Refresh the page.');
+      });
+      return promise;
+    }
 
     const head = el('section', { class: 'card center' });
     const slots = el('section', { class: 'card' });
@@ -44,9 +52,14 @@ export default {
       if (word.length < 3) return toast('Words need at least 3 letters');
       if (!level().words.includes(word)) return toast('Not on this level’s list');
       if (g.found?.[word]) return toast(`${nameOf(g.found[word])} already found it`);
-      const result = await runTransaction(gref(`/found/${word}`), (cur) => cur || session.uid);
-      if (result.snapshot.val() === session.uid) toast(`+${points(word)} 🍪`);
-      else toast('Someone was faster!');
+      try {
+        const result = await runTransaction(gref(`/found/${word}`), (cur) => cur || session.uid);
+        if (result.snapshot.val() === session.uid) toast(`+${points(word)} 🍪`);
+        else toast('Someone was faster!');
+      } catch (err) {
+        write(Promise.reject(err), 'Could not save the word');
+        toast('Could not save that word. Refresh if the host changed the game.');
+      }
     }
     function buildPlay() {
       picked = []; letters = shuffled([...level().letters]);
@@ -64,12 +77,19 @@ export default {
     }
 
     // ----- Host referee -----
-    const act = (fn) => { if (!acting) { acting = true; fn(); } };
+    const act = (fn) => {
+      if (acting) return;
+      acting = true;
+      Promise.resolve().then(fn).catch((err) => {
+        console.warn('Host action failed', err);
+        acting = false;
+      });
+    };
     function finishRound() {
       const scores = { ...(g.scores || {}) }; const gain = {};
       Object.entries(g.found || {}).forEach(([w, uid]) => { gain[uid] = (gain[uid] || 0) + points(w); });
       Object.entries(gain).forEach(([uid, pts]) => { scores[uid] = (scores[uid] || 0) + pts; });
-      update(gref(), { phase: 'over', scores, gain, overAt: serverNow() + OVER_MS });
+      return update(gref(), { phase: 'over', scores, gain, overAt: serverNow() + OVER_MS });
     }
     function next(r) {
       if (r >= g.total) return update(gref(), { phase: 'final' });
@@ -90,7 +110,7 @@ export default {
       update(room) {
         g = room.game || null;
         if (!g) {
-          if (session.isHost) set(gref(), { round: 0, total: ROUNDS, levels: shuffled(LEVELS.map((_, i) => i)).slice(0, ROUNDS), phase: 'play', endsAt: serverNow() + ROUND_MS, scores: {} });
+          if (session.isHost) write(set(gref(), { round: 0, total: ROUNDS, levels: shuffled(LEVELS.map((_, i) => i)).slice(0, ROUNDS), phase: 'play', endsAt: serverNow() + ROUND_MS, scores: {} }), 'Could not start Word Cookies');
           return;
         }
         if (actKey !== `${g.round}${g.phase}`) { actKey = `${g.round}${g.phase}`; acting = false; }
