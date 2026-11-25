@@ -51,6 +51,7 @@ export default {
     let actKey = '';
     let acting = false;
     let myLiar = false;
+    let assignmentKnown = false; // true once we know whether we are the liar
     let hostLiar = '';
     let pendingLiar = ''; // set locally until the assignment listener reports back
     let hostCategory = CATEGORY_NAMES[0];
@@ -193,8 +194,12 @@ export default {
     }
 
     function advanceClue() {
-      const index = Number(g.clueIndex || 0) + 1;
       const order = g.clueOrder || {};
+      const present = new Set(players().map((p) => p.uid));
+      let index = Number(g.clueIndex || 0) + 1;
+      // Skip anyone who has left the room. The database rules refuse a turn for
+      // a player who is gone, which used to freeze the game on the clue screen.
+      while (index < Object.keys(order).length && !present.has(order[String(index)])) index += 1;
       if (index >= Object.keys(order).length) {
         return update(gref(), {
           phase: 'discuss', endsAt: serverNow() + DISCUSS_MS,
@@ -257,9 +262,22 @@ export default {
           act(() => startRound(hostCategory, hostWord));
         }
       }
+      if (['setup', 'clue', 'discuss', 'vote'].includes(g.phase)) {
+        // Spot the Liar needs 3 players, and the liar must still be in the room.
+        if (players().length < 3) {
+          act(() => update(gref(), { ...clearRoundFields(), phase: 'final' }));
+          return;
+        }
+        const liar = liarOf();
+        if (liar && !players().some((p) => p.uid === liar)) {
+          act(() => newRound(g.round)); // the liar left: start this round again with a new liar
+          return;
+        }
+      }
       if (g.phase === 'clue') {
         const current = g.currentCluer;
-        const online = players().find((p) => p.uid === current)?.online !== false;
+        const here = players().find((p) => p.uid === current);
+        const online = Boolean(here) && here.online !== false;
         if (!current || !online || g.clues?.[current] || now >= g.endsAt) act(advanceClue);
       }
       if (g.phase === 'discuss' && now >= g.endsAt) act(startVote);
@@ -267,7 +285,8 @@ export default {
         // The liar is not expected to vote themselves out. An offline liar
         // must not hold the round until the full timer expires.
         const voters = players().filter((p) => p.online !== false && p.uid !== liarOf());
-        if (now >= g.endsAt || (voters.length && voters.every((p) => g.liarVotes?.[p.uid]))) act(revealLiar);
+        // A new host needs a moment to learn who the liar is; never write a blank liar.
+        if (liarOf() && (now >= g.endsAt || (voters.length && voters.every((p) => g.liarVotes?.[p.uid])))) act(revealLiar);
       }
       if (g.phase === 'reveal') {
         if (now >= g.guessEndsAt || (g.caught && g.liarGuess)) act(finishReveal);
@@ -284,11 +303,16 @@ export default {
 
     // ----- Hidden liar assignment -----
     function watchAssignment() {
-      const key = g ? `${session.code}/${g.round}` : '';
+      // The host may read every assignment, a normal player only their own. Include
+      // the host flag in the key, so a player who BECOMES host (the old host's phone
+      // went away) re-subscribes and learns who the liar is. Without this the new
+      // host never knew the liar and the game froze at the vote.
+      const key = g ? `${session.code}/${g.round}/${session.isHost ? 'host' : 'player'}` : '';
       if (key === assignmentKey) return;
       if (stopAssignment) { stopAssignment(); stopAssignment = null; }
       assignmentKey = key;
       myLiar = false;
+      assignmentKnown = false;
       hostLiar = '';
       panelKey = '';
       if (!key) return;
@@ -302,7 +326,9 @@ export default {
           } else {
             myLiar = snap.val() === true;
           }
+          assignmentKnown = true;
           panelKey = '';
+          watchSecret(); // now we know our role: listen to the secret word, or not
           renderPanel();
         },
         (err) => console.warn('Liar assignment listener error', err),
@@ -312,7 +338,13 @@ export default {
     // ----- Secret word -----
     function watchSecret() {
       const live = Boolean(g && g.phase);
-      const allowed = live && (!amILiar() || isRevealed(g.phase));
+      // Wait until we know whether we are the liar: the liar may not read the word,
+      // and asking too early only produced a blocked-read error.
+      // The liar may read the word only from the end of the round (the database rules
+      // say the same). Asking earlier is refused and Firebase then cancels the
+      // listener for good, so the liar never saw the word afterwards.
+      const liarMayRead = Boolean(g) && (['over', 'final'].includes(g.phase) || Boolean(g.liarGuess));
+      const allowed = live && assignmentKnown && (!amILiar() || liarMayRead);
       const key = allowed ? `${session.code}/${g.round}` : '';
       if (key === secretKey) return;
       if (stopSecret) { stopSecret(); stopSecret = null; }

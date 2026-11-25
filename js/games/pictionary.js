@@ -264,12 +264,18 @@ export default {
       myWord = word; positions = nextPositions; shown = 0;
       await set(gref('/pick'), { len: word.length, hint: maskHint(0) });
     }
+    let choosing = false;
     async function choose(word) {
+      if (choosing) return; // ignore a double tap while the first one is still being saved
+      choosing = true;
       try {
         await pickWord(word);
       } catch (err) {
-        noteError('Could not choose a word', err);
-        toast('Could not choose that word. Try again.');
+        console.warn('Could not choose a word', err);
+        // If the host has already started drawing, the first tap worked: no error to show.
+        if (g?.phase === 'pick') toast('Could not choose that word. Try again.');
+      } finally {
+        choosing = false;
       }
     }
     async function guess(text) {
