@@ -41,6 +41,9 @@
           },
           "$other": {
             ".validate": false
+          },
+          "startAt": {
+            ".validate": "!newData.exists() || newData.isNumber()"
           }
         },
         "players": {
@@ -341,7 +344,7 @@
         ".validate": "$code.matches(/^[A-Z]{5}$/)",
         ".write": "auth != null && !newData.exists() && root.child('rooms').child($code).child('meta').child('hostUid').val() === auth.uid",
         "$round": {
-          ".read": "auth != null && (data.child('drawer').val() === auth.uid || ((root.child('rooms').child($code).child('players').child(auth.uid).exists() && !root.child('rooms').child($code).child('kicked').child(auth.uid).exists()) && root.child('rooms').child($code).child('game').child('phase').val() === 'over'))",
+          ".read": "auth != null && (data.child('drawer').val() === auth.uid || (root.child('rooms').child($code).child('game').child('drawer').val() === auth.uid && root.child('rooms').child($code).child('players').child(auth.uid).exists()) || ((root.child('rooms').child($code).child('players').child(auth.uid).exists() && !root.child('rooms').child($code).child('kicked').child(auth.uid).exists()) && root.child('rooms').child($code).child('game').child('phase').val() === 'over'))",
           ".write": "auth != null && ((root.child('rooms').child($code).child('meta').child('hostUid').val() === auth.uid && !newData.exists()) || ((!data.exists() || data.child('drawer').val() === auth.uid) && newData.child('drawer').val() === auth.uid && newData.child('round').val() === root.child('rooms').child($code).child('game').child('round').val() && root.child('rooms').child($code).child('game').child('drawer').val() === auth.uid && root.child('rooms').child($code).child('game').child('phase').val() === 'pick'))",
           ".validate": "$round.matches(/^[0-9]+$/) && (!newData.exists() || newData.hasChildren(['drawer', 'round', 'word', 'positions']))",
           "drawer": {
