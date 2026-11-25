@@ -60,6 +60,8 @@ let leaving = false;
 let stopPublic = null; // stops the public-room list when we leave the home screen
 let stopStats = null; // stops the live online/played-today counters
 let stopConnection = null;
+let serverNow = () => Date.now();
+const AUTO_START_MS = 10000; // lobby countdown once enough players are in
 let presenceUid = null;
 const playedTodayKeys = new Set(); // avoid rewriting the same day/game over and over
 
@@ -123,9 +125,11 @@ async function start() {
   // Load the Firebase-dependent modules only after the config check.
   // If the CDN is blocked, show a real error instead of a permanent "Loading…".
   try {
-    const [{ signIn, onConnectionChange, recordVisit }, room, stats] = await Promise.all([
+    const [fb, room, stats] = await Promise.all([
       import('./firebase.js'), import('./room.js'), import('./stats.js'),
     ]);
+    const { signIn, onConnectionChange, recordVisit } = fb;
+    serverNow = fb.serverNow;
     statsModule = stats;
     [homeModule, lobbyModule, gamesModule] = await Promise.all([
       import('./home.js'), import('./lobby.js'), import('./games/registry.js'),
@@ -194,7 +198,7 @@ function showHome(invitedCode, uid, room) {
     onCreate: async (profile, options) =>
       enterRoom(await room.createRoom(profile, options), uid, room, options?.gameId || ''),
     onQuick: async (profile, gameId) =>
-      enterRoom(await room.quickPlay(profile, gameId), uid, room, gameId || ''),
+      enterRoom(await room.quickPlay(profile, gameId, gamesModule.getGame(gameId)?.maxPlayers), uid, room, gameId || ''),
     watchPublic: (callback) => { stopPublic?.(); stopPublic = room.watchPublicRooms(callback); },
     watchStats: (callback) => {
       stopStats?.();
@@ -293,16 +297,41 @@ function enterRoom(code, uid, room, selectedGameId = '') {
   });
   activeSession = session;
 
+  // The lobby needs a ticking clock for the start countdown.
+  const lobbyClock = setInterval(() => {
+    if (leaving || !session.room) return;
+    maybeAutoStart(session.room);
+    if (session.room.meta.status === 'lobby' && session.room.meta.startAt) showRoom(session, session.room, () => leave());
+  }, 1000);
+  session.unsubscribers.push(() => clearInterval(lobbyClock));
+
+  let startAtPending = false;
+  function writeStartAt(value) {
+    if (startAtPending) return;
+    startAtPending = true;
+    session.setStartAt(value).catch((err) => console.warn('Could not set the start time', err))
+      .finally(() => { startAtPending = false; });
+  }
   function maybeAutoStart(r) {
     if (lastStatus === 'playing' && r.meta.status === 'lobby') autoStarted = false;
     lastStatus = r.meta.status;
     if (autoStarted || !session.isHost || r.meta.status !== 'lobby') return;
     const gameId = r.meta.gameId || autoStartGameId;
     const game = gameId ? gamesModule.getGame(gameId) : null;
-    if (!game) return;
+    if (!game) { if (r.meta.startAt) writeStartAt(null); return; }
     // Offline players must not count towards a minimum player requirement.
     const count = session.playerList().filter((p) => p.online !== false && !p.isBot).length;
-    if (count < game.minPlayers || (game.maxPlayers && count > game.maxPlayers)) return;
+    if (count < game.minPlayers || (game.maxPlayers && count > game.maxPlayers)) {
+      if (r.meta.startAt) writeStartAt(null);
+      return;
+    }
+    // Enough players: count down so friends who are still joining are not locked
+    // out. A full room, or the host tapping Start, begins straight away.
+    const full = count >= Math.min(game.maxPlayers || 16, 16);
+    if (!full) {
+      if (!r.meta.startAt) { writeStartAt(serverNow() + AUTO_START_MS); return; }
+      if (serverNow() < r.meta.startAt) return;
+    }
     autoStarted = true;
     autoStartGameId = '';
     session.startGame(game.id).catch((err) => {
