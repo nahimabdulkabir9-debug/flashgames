@@ -258,7 +258,7 @@ export default {
           }), 'Could not start NPAT');
           return;
         }
-        if (session.isHost && !Array.isArray(g.letters?.[g.round])) {
+        if (session.isHost && typeof g.letters?.[g.round] !== 'string') {
           write(update(gref(), { letters: shuffled(LETTERS).slice(0, ROUNDS) }), 'Could not repair the letter list');
         }
         const actionKey = `${g.round}|${g.phase}|${Boolean(g.stoppedBy)}`;
