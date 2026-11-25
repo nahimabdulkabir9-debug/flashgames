@@ -12,6 +12,7 @@ import { el, mount, toast, showModal, copyText } from './ui.js';
 import { GAMES } from './games/registry.js';
 import { avatarEl } from './avatars.js';
 import { roomLink, MAX_PLAYERS_PER_ROOM } from './room.js';
+import { serverNow } from './firebase.js';
 
 /**
  * @param container where to draw
@@ -25,6 +26,8 @@ export function renderLobby(container, session, { onLeave }) {
   const link = roomLink(session.code);
   const isPublic = session.room.meta.public === true;
   const chosen = GAMES.find((game) => game.id === session.room.meta.gameId);
+  const startAt = session.room.meta.startAt;
+  const secondsLeft = startAt ? Math.max(0, Math.ceil((startAt - serverNow()) / 1000)) : 0;
 
   // ---- Room code + sharing ----
   const shareText = `Join my ${APP_NAME} room! Code: ${session.code}\n${link}`;
@@ -94,18 +97,28 @@ export function renderLobby(container, session, { onLeave }) {
           ? `Waiting for ${chosen.minPlayers - players.length} more player(s) to play ${chosen.name}…`
           : chosen.maxPlayers && players.length > chosen.maxPlayers
             ? `${chosen.name} works with up to ${chosen.maxPlayers} players. Remove ${players.length - chosen.maxPlayers} player(s) first.`
-            : `Ready to start ${chosen.emoji} ${chosen.name} — tap Start game.`)
+            : startAt
+              ? `Starting ${chosen.emoji} ${chosen.name} in ${secondsLeft}s. More players can still join.`
+              : `Ready to start ${chosen.emoji} ${chosen.name}.`)
         : el('p', { class: 'muted center' }, waitingFor.length
           ? `Waiting for ${waitingFor.length} player(s) to get ready…`
           : 'Everyone is ready!'),
       el('button', {
         class: 'btn', type: 'button',
+        // A game picked on the home page starts straight away. Only ask
+        // "which game?" when nothing was chosen yet.
+        onclick: () => (chosen ? startGame(session, chosen, players.length) : chooseGame(session, players.length)),
+      }, chosen ? `▶️ Start ${chosen.name}` : '▶️ Start game'),
+      chosen ? el('button', {
+        class: 'btn secondary', type: 'button',
         onclick: () => chooseGame(session, players.length),
-      }, '▶️ Start game'),
+      }, '🎲 Change game') : null,
     );
   } else {
     controls.append(
-      el('p', { class: 'muted center' }, 'The host will start the game when everyone is ready.'),
+      el('p', { class: 'muted center' }, chosen
+        ? (startAt ? `Starting ${chosen.emoji} ${chosen.name} in ${secondsLeft}s…` : `Waiting for more players to join ${chosen.emoji} ${chosen.name}…`)
+        : 'The host will start the game when everyone is ready.'),
       el('button', {
         class: `btn${me.ready ? ' secondary' : ''}`, type: 'button',
         onclick: () => session.setReady(!me.ready).catch(() => toast('Could not save — check your connection')),
@@ -128,6 +141,16 @@ function confirmKick(session, player) {
   });
 }
 
+function startGame(session, game, playerCount) {
+  if (playerCount < game.minPlayers) {
+    toast(`${game.name} needs at least ${game.minPlayers} players`);
+  } else if (game.maxPlayers && playerCount > game.maxPlayers) {
+    toast(`${game.name} works with up to ${game.maxPlayers} players`);
+  } else {
+    session.startGame(game.id).catch(() => toast('Could not start the game'));
+  }
+}
+
 // The host picks a game from the registry; everyone's screen switches (see app.js).
 function chooseGame(session, playerCount) {
   showModal({
@@ -136,15 +159,7 @@ function chooseGame(session, playerCount) {
     actions: [
       ...GAMES.map((game) => ({
         label: `${game.emoji} ${game.name}`,
-        onClick: () => {
-          if (playerCount < game.minPlayers) {
-            toast(`${game.name} needs at least ${game.minPlayers} players`);
-          } else if (game.maxPlayers && playerCount > game.maxPlayers) {
-            toast(`${game.name} works with up to ${game.maxPlayers} players`);
-          } else {
-            session.startGame(game.id).catch(() => toast('Could not start the game'));
-          }
-        },
+        onClick: () => startGame(session, game, playerCount),
       })),
       { label: 'Cancel', style: 'secondary' },
     ],

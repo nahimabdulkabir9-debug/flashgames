@@ -99,6 +99,14 @@ export async function createRoom(profile, { isPublic = false, gameId = '' } = {}
 
     try {
       await set(ref(db, `rooms/${code}/players/${uid}`), newPlayer(profile, '1'));
+      // List a public room straight away, so a friend who taps Play Now a moment
+      // later can find it. (The room session keeps this listing fresh afterwards.)
+      if (isPublic) {
+        await set(ref(db, `publicRooms/${code}`), {
+          hostName: profile.name, avatar: profile.avatar, players: 1,
+          ...(gameId ? { gameId } : {}), updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
       return code;
     } catch (err) {
       // Don't leave a room shell behind if the player write failed.
@@ -371,6 +379,7 @@ export class RoomSession {
     await update(ref(db), {
       [`rooms/${this.code}/meta/gameId`]: gameId,
       [`rooms/${this.code}/meta/status`]: 'playing',
+      [`rooms/${this.code}/meta/startAt`]: null,
       [`rooms/${this.code}/game`]: null,
     });
   }
@@ -382,11 +391,17 @@ export class RoomSession {
     await update(ref(db), {
       [`rooms/${this.code}/meta/status`]: 'lobby',
       [`rooms/${this.code}/meta/gameId`]: null,
+      [`rooms/${this.code}/meta/startAt`]: null,
       [`rooms/${this.code}/game`]: null,
       [`gameSecrets/${this.code}`]: null,
       [`liarSecrets/${this.code}`]: null,
       [`liarAssignments/${this.code}`]: null,
     });
+  }
+
+  /** Host only: set (or clear, with null) the moment the chosen game starts by itself. */
+  setStartAt(value) {
+    return update(ref(db, this.path('meta')), { startAt: value });
   }
 
   /** Host only: make the room public or private. */
@@ -488,9 +503,9 @@ function pruneStale(rooms) {
     .filter((r) => serverNow() - (r.updatedAt || 0) >= STALE_MS)
     .forEach((r) => remove(ref(db, `publicRooms/${r.code}`)).catch(() => {}));
 }
-function openRooms(rooms) {
+function openRooms(rooms, maxPlayers = MAX_PLAYERS_PER_ROOM) {
   return rooms
-    .filter((r) => isFresh(r) && r.players < MAX_PLAYERS_PER_ROOM)
+    .filter((r) => isFresh(r) && r.players < Math.min(maxPlayers, MAX_PLAYERS_PER_ROOM))
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 function freshRooms(value) {
@@ -512,15 +527,52 @@ export function watchPublicRooms(callback) {
 }
 
 /** Join a random open public room, or start a new public one if none is open. */
-export async function quickPlay(profile, gameId = '') {
+export async function quickPlay(profile, gameId = '', maxPlayers = MAX_PLAYERS_PER_ROOM) {
   await signIn();
-  // A game chosen from the homepage gets its own public room so everyone
-  // who joins is playing the same game. app.js starts it when enough arrive.
-  if (gameId) return createRoom(profile, { isPublic: true, gameId });
-  const open = openRooms(allPublicRooms((await get(ref(db, 'publicRooms'))).val()));
-  while (open.length) {
-    const [pick] = open.splice(Math.floor(Math.random() * open.length), 1);
-    try { return await joinRoom(pick.code, profile); } catch { /* try the next one */ }
+  // Look for a public lobby that is waiting for this same game (or, with no
+  // game chosen, any open lobby). Only if none exists do we open a new room.
+  // Without this, two people tapping Play Now would each get a private room
+  // and never meet. app.js starts the game when enough players have arrived.
+  let listed = [];
+  try {
+    listed = allPublicRooms((await get(ref(db, 'publicRooms'))).val());
+  } catch (err) {
+    console.warn('Could not read the public room list', err);
   }
-  return createRoom(profile, { isPublic: true });
+  const wanted = gameId ? listed.filter((r) => r.gameId === gameId) : listed;
+  const open = openRooms(wanted, maxPlayers).sort((a, b) => b.players - a.players);
+  for (const pick of open) {
+    try { return await joinRoom(pick.code, profile); } catch { /* full or closed: try the next one */ }
+  }
+  // Nobody was waiting. Pause a moment and look again: someone who tapped at the
+  // same instant may have just opened a room.
+  await new Promise((resolve) => setTimeout(resolve, 300 + Math.random() * 700));
+  try {
+    const again = openRooms(allPublicRooms((await get(ref(db, 'publicRooms'))).val())
+      .filter((r) => !gameId || r.gameId === gameId), maxPlayers);
+    for (const pick of again) {
+      try { return await joinRoom(pick.code, profile); } catch { /* try the next one */ }
+    }
+  } catch (err) {
+    console.warn('Could not re-check the public room list', err);
+  }
+  const code = await createRoom(profile, { isPublic: true, ...(gameId ? { gameId } : {}) });
+  if (!gameId) return code;
+  // Two people can still open a room in the same instant. Wait briefly, and if
+  // another room for this game has a lower code, move into it (the higher code
+  // gives way, so both players always end up together).
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  try {
+    const rivals = openRooms(allPublicRooms((await get(ref(db, 'publicRooms'))).val())
+      .filter((r) => r.gameId === gameId && r.code < code), maxPlayers);
+    if (rivals.length) {
+      await remove(ref(db, `publicRooms/${code}`)).catch(() => {});
+      await remove(ref(db, `rooms/${code}`));
+      try { return await joinRoom(rivals[0].code, profile); } catch { /* fall through */ }
+      return createRoom(profile, { isPublic: true, gameId });
+    }
+  } catch (err) {
+    console.warn('Could not merge with another room', err);
+  }
+  return code;
 }
